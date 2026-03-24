@@ -1,0 +1,22 @@
+{
+  "name": "산방식당 발주시스템",
+  "short_name": "산방발주",
+  "description": "산방식당 가맹점 전용 발주프로그램",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#1B4332",
+  "theme_color": "#1B4332",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/img/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/img/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
