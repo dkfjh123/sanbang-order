@@ -45,6 +45,7 @@ export default function NewOrderPage() {
   const [cartOpen, setCartOpen] = useState(false);
   const [deliveryInfo, setDeliveryInfo] = useState<DeliveryInfo | null>(null);
   const [jejuPalletBoxes, setJejuPalletBoxes] = useState<number>(0);
+  const [inventory, setInventory] = useState<Record<string, number>>({});
   const JEJU_PALLET_MIN = 55;
   const supabase = createClient();
 
@@ -79,6 +80,18 @@ export default function NewOrderPage() {
         .eq('is_active', true)
         .order('sort_order');
       setProducts((prods as Product[]) || []);
+
+      // 재고 정보 로드
+      const { data: invData } = await supabase
+        .from('inventory')
+        .select('product_id, quantity');
+      if (invData) {
+        const invMap: Record<string, number> = {};
+        invData.forEach((i: { product_id: string; quantity: number }) => {
+          invMap[i.product_id] = i.quantity;
+        });
+        setInventory(invMap);
+      }
 
       if (prof.role === 'admin') {
         // 관리자: 가맹점 선택 가능
@@ -161,6 +174,13 @@ export default function NewOrderPage() {
   };
 
   const getQty = (productId: string) => cart.find((c) => c.product.id === productId)?.quantity || 0;
+  const getStock = (productId: string): number | null => {
+    return productId in inventory ? inventory[productId] : null;
+  };
+  const isOutOfStock = (productId: string): boolean => {
+    const stock = getStock(productId);
+    return stock !== null && stock <= 0;
+  };
 
   const totalAmount = cart.reduce((sum, item) => sum + item.product.price_with_tax * item.quantity, 0);
 
@@ -411,8 +431,11 @@ export default function NewOrderPage() {
       <div className={`bg-white rounded-xl shadow-sm border border-gray-100 divide-y divide-gray-100 ${!selectedStoreId ? 'opacity-50 pointer-events-none' : ''}`}>
         {filteredProducts.map((product) => {
           const qty = getQty(product.id);
+          const stock = getStock(product.id);
+          const outOfStock = isOutOfStock(product.id);
+          const maxQty = stock !== null ? stock : Infinity;
           return (
-            <div key={product.id} className="p-5 sm:p-6 flex items-center gap-5">
+            <div key={product.id} className={`p-5 sm:p-6 flex items-center gap-5 ${outOfStock ? 'opacity-50' : ''}`}>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-2">
                   <span className={`px-2.5 py-1 rounded text-sm font-semibold ${
@@ -425,17 +448,23 @@ export default function NewOrderPage() {
                   <span className="text-base text-gray-400">
                     {storageLabel[product.storage || ''] || ''} · {product.spec}
                   </span>
+                  {stock !== null && (
+                    <span className={`text-sm font-medium ${outOfStock ? 'text-red-500' : stock <= 5 ? 'text-orange-500' : 'text-gray-400'}`}>
+                      재고 {stock}
+                    </span>
+                  )}
                 </div>
                 <h3 className="font-bold text-gray-800 text-lg">{product.name}</h3>
                 <p className="text-lg text-gray-600 mt-1">
                   ₩{product.price_with_tax.toLocaleString()} / {product.unit}
                   {product.is_tax_free && <span className="ml-1 text-base text-green-600">(면세)</span>}
                 </p>
+                {outOfStock && <p className="text-red-500 font-bold text-sm mt-1">품절</p>}
               </div>
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => updateCart(product, qty - 1)}
-                  disabled={qty === 0}
+                  disabled={qty === 0 || outOfStock}
                   className="w-12 h-12 rounded-lg border border-gray-300 flex items-center justify-center text-xl text-gray-600 hover:bg-gray-50 disabled:opacity-30"
                 >
                   −
@@ -445,7 +474,8 @@ export default function NewOrderPage() {
                 </span>
                 <button
                   onClick={() => updateCart(product, qty + 1)}
-                  className="w-12 h-12 rounded-lg border border-[#1B4332] bg-[#1B4332] text-white text-xl flex items-center justify-center hover:bg-[#2D6A4F]"
+                  disabled={outOfStock || qty >= maxQty}
+                  className="w-12 h-12 rounded-lg border border-[#1B4332] bg-[#1B4332] text-white text-xl flex items-center justify-center hover:bg-[#2D6A4F] disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   +
                 </button>

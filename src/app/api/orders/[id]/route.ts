@@ -157,6 +157,39 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   // 주문 취소 처리
   await adminSupabase.from('orders').update({ status: 'cancelled' }).eq('id', id);
 
+  // 재고 복구
+  const { data: cancelItems } = await adminSupabase
+    .from('order_items')
+    .select('product_id, product_name, quantity')
+    .eq('order_id', id);
+
+  if (cancelItems) {
+    for (const item of cancelItems) {
+      const { data: inv } = await adminSupabase
+        .from('inventory')
+        .select('quantity')
+        .eq('product_id', item.product_id)
+        .single();
+
+      if (inv) {
+        await adminSupabase
+          .from('inventory')
+          .update({ quantity: inv.quantity + item.quantity })
+          .eq('product_id', item.product_id);
+
+        await adminSupabase
+          .from('inventory_transactions')
+          .insert({
+            product_id: item.product_id,
+            type: 'inbound',
+            quantity: item.quantity,
+            description: `발주 취소 복구 (${order.order_number})`,
+            created_by: user.id,
+          });
+      }
+    }
+  }
+
   // 예치금 환불 (직영점 제외)
   const { data: store } = await adminSupabase
     .from('stores')

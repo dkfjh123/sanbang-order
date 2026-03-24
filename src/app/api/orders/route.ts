@@ -67,6 +67,24 @@ export async function POST(request: Request) {
     }, { status: 400 });
   }
 
+  // 재고 확인 (inventory에 등록된 상품만)
+  const productIds = items.map((item: { product_id: string }) => item.product_id);
+  const { data: inventoryData } = await adminSupabase
+    .from('inventory')
+    .select('product_id, quantity, products(name)')
+    .in('product_id', productIds);
+
+  if (inventoryData && inventoryData.length > 0) {
+    for (const item of items as { product_id: string; product_name: string; quantity: number }[]) {
+      const inv = inventoryData.find((i: { product_id: string }) => i.product_id === item.product_id);
+      if (inv && inv.quantity < item.quantity) {
+        return NextResponse.json({
+          error: `${item.product_name} 재고가 부족합니다. (현재: ${inv.quantity}개, 주문: ${item.quantity}개)`,
+        }, { status: 400 });
+      }
+    }
+  }
+
   // 주문번호 생성
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
@@ -125,6 +143,30 @@ export async function POST(request: Request) {
 
   if (itemsError) {
     return NextResponse.json({ error: itemsError.message }, { status: 400 });
+  }
+
+  // 재고 차감 (inventory에 등록된 상품만)
+  if (inventoryData && inventoryData.length > 0) {
+    for (const item of items as { product_id: string; product_name: string; quantity: number }[]) {
+      const inv = inventoryData.find((i: { product_id: string }) => i.product_id === item.product_id);
+      if (inv) {
+        const newQty = inv.quantity - item.quantity;
+        await adminSupabase
+          .from('inventory')
+          .update({ quantity: newQty })
+          .eq('product_id', item.product_id);
+
+        await adminSupabase
+          .from('inventory_transactions')
+          .insert({
+            product_id: item.product_id,
+            type: 'outbound',
+            quantity: -item.quantity,
+            description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name}`,
+            created_by: user.id,
+          });
+      }
+    }
   }
 
   // 예치금 차감 (직영점은 건너뜀)
