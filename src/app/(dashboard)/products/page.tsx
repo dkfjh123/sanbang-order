@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import PasswordConfirmModal from '@/components/PasswordConfirmModal';
 
 interface Product {
   id: string;
@@ -201,6 +202,7 @@ export default function ProductsPage() {
       {editingProduct && (
         <EditProductModal
           product={editingProduct}
+          userRole={profile?.role || ''}
           onClose={() => setEditingProduct(null)}
           onSaved={() => {
             setEditingProduct(null);
@@ -403,10 +405,12 @@ function AddProductModal({
 
 function EditProductModal({
   product,
+  userRole,
   onClose,
   onSaved,
 }: {
   product: Product;
+  userRole: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -422,10 +426,30 @@ function EditProductModal({
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
   const supabase = createClient();
+
+  // 비밀번호 확인이 필요한 경우:
+  // - 전용상품 수정 (admin만 가능, 항상 비번 확인)
+  // - 범용상품 가격 변경 (shinwa가 가격을 바꿨을 때)
+  const needsPasswordConfirm = () => {
+    if (product.product_type === 'exclusive') return true;
+    if (product.product_type === 'general' && userRole === 'shinwa') {
+      return form.price !== product.price || form.price_with_tax !== product.price_with_tax;
+    }
+    return false;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (needsPasswordConfirm()) {
+      setShowPasswordModal(true);
+      return;
+    }
+    await doSave();
+  };
+
+  const doSave = async () => {
     setLoading(true);
     setError('');
 
@@ -456,7 +480,12 @@ function EditProductModal({
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-gray-800">상품 수정</h3>
+          <div>
+            <h3 className="text-lg font-bold text-gray-800">상품 수정</h3>
+            {product.product_type === 'exclusive' && (
+              <p className="text-xs text-orange-600 mt-0.5">전용상품 — 저장 시 비밀번호 확인 필요</p>
+            )}
+          </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
         </div>
 
@@ -573,6 +602,17 @@ function EditProductModal({
             </button>
           </div>
         </form>
+
+        {showPasswordModal && (
+          <PasswordConfirmModal
+            title="비밀번호 확인"
+            message={product.product_type === 'exclusive'
+              ? '전용상품 수정은 비밀번호 확인이 필요합니다.'
+              : '가격 변경은 비밀번호 확인이 필요합니다.'}
+            onConfirm={() => { setShowPasswordModal(false); doSave(); }}
+            onCancel={() => setShowPasswordModal(false)}
+          />
+        )}
       </div>
     </div>
   );

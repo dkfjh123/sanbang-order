@@ -36,6 +36,9 @@ export default function DashboardPage() {
   const [storeRegion, setStoreRegion] = useState<'seoul' | 'jeju' | null>(null);
   const [deliveryInfo, setDeliveryInfo] = useState<DeliveryInfo | null>(null);
   const [jejuPalletBoxes, setJejuPalletBoxes] = useState<number>(0);
+  const [todayOrders, setTodayOrders] = useState(0);
+  const [pendingDelivery, setPendingDelivery] = useState(0);
+  const [monthlyOrders, setMonthlyOrders] = useState(0);
   const JEJU_PALLET_MIN = 55;
   const supabase = createClient();
 
@@ -93,6 +96,23 @@ export default function DashboardPage() {
             .select('*', { count: 'exact', head: true });
           setStoreCount(count || 0);
 
+          // 관리자: 오늘 발주 건수
+          const todayStart = new Date();
+          todayStart.setHours(0, 0, 0, 0);
+          const { count: todayCount } = await supabase
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .gte('created_at', todayStart.toISOString())
+            .neq('status', 'cancelled');
+          setTodayOrders(todayCount || 0);
+
+          // 관리자: 배송 대기 (pending + confirmed)
+          const { count: pendingCount } = await supabase
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .in('status', ['pending', 'confirmed']);
+          setPendingDelivery(pendingCount || 0);
+
           // 관리자: 전체 최근 충전 내역 (가맹점명 포함)
           const { data: txData } = await supabase
             .from('deposit_transactions')
@@ -108,6 +128,35 @@ export default function DashboardPage() {
             .eq('status', 'pending')
             .order('created_at', { ascending: true });
           setPendingRequests((reqData as DepositRequest[]) || []);
+        }
+
+        // 가맹점: 이번 달 발주 건수
+        if (prof.role === 'store' && prof.store_id) {
+          const monthStart = new Date();
+          monthStart.setDate(1);
+          monthStart.setHours(0, 0, 0, 0);
+          const { count: mCount } = await supabase
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .eq('store_id', prof.store_id)
+            .gte('created_at', monthStart.toISOString())
+            .neq('status', 'cancelled');
+          setMonthlyOrders(mCount || 0);
+        }
+
+        // 신화푸드: 처리 대기 + 배송 예정
+        if (prof.role === 'shinwa') {
+          const { count: pCount } = await supabase
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+          setTodayOrders(pCount || 0); // 처리 대기 발주
+
+          const { count: cCount } = await supabase
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'confirmed');
+          setPendingDelivery(cCount || 0); // 배송 예정
         }
 
         // 제주 파레트 현황 (관리자/신화/제주 가맹점)
@@ -201,8 +250,8 @@ export default function DashboardPage() {
       {profile.role === 'admin' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard title="등록 가맹점" value={`${storeCount}곳`} />
-          <StatCard title="오늘 발주" value="0건" color="blue" />
-          <StatCard title="배송 대기" value="0건" color="yellow" />
+          <StatCard title="오늘 발주" value={`${todayOrders}건`} color="blue" />
+          <StatCard title="배송 대기" value={`${pendingDelivery}건`} color="yellow" />
           <StatCard
             title="입금 확인 대기"
             value={`${pendingRequests.length}건`}
@@ -300,7 +349,7 @@ export default function DashboardPage() {
               title="예치금 잔액"
               value={depositBalance !== null ? `₩${depositBalance.toLocaleString()}` : '로딩 중...'}
             />
-            <StatCard title="이번 달 발주" value="0건" color="blue" />
+            <StatCard title="이번 달 발주" value={`${monthlyOrders}건`} color="blue" />
           </div>
 
           {/* 배송 스케줄 안내 */}
@@ -370,8 +419,8 @@ export default function DashboardPage() {
       {/* 신화푸드 대시보드 */}
       {profile.role === 'shinwa' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <StatCard title="처리 대기 발주" value="0건" color="blue" />
-          <StatCard title="배송 예정" value="0건" color="yellow" />
+          <StatCard title="처리 대기 발주" value={`${todayOrders}건`} color="blue" />
+          <StatCard title="배송 예정" value={`${pendingDelivery}건`} color="yellow" />
         </div>
       )}
 

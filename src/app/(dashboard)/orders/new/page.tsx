@@ -233,6 +233,17 @@ export default function NewOrderPage() {
       if (store && !store.is_direct) {
         setStore({ ...store, deposit_balance: store.deposit_balance - orderedAmount });
       }
+      // 재고 갱신
+      const { data: invData } = await supabase
+        .from('inventory')
+        .select('product_id, quantity');
+      if (invData) {
+        const invMap: Record<string, number> = {};
+        invData.forEach((i: { product_id: string; quantity: number }) => {
+          invMap[i.product_id] = i.quantity;
+        });
+        setInventory(invMap);
+      }
       setResult({ success: true, message: data.order_number, amount: orderedAmount, deliveryInfo: deliveryInfo || undefined });
     } else {
       setResult({ success: false, message: data.error, amount: 0 });
@@ -448,7 +459,7 @@ export default function NewOrderPage() {
                   <span className="text-base text-gray-400">
                     {storageLabel[product.storage || ''] || ''} · {product.spec}
                   </span>
-                  {stock !== null && (
+                  {stock !== null && profile?.role !== 'store' && (
                     <span className={`text-sm font-medium ${outOfStock ? 'text-red-500' : stock <= 5 ? 'text-orange-500' : 'text-gray-400'}`}>
                       재고 {stock}
                     </span>

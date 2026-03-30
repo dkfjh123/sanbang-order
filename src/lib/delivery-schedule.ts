@@ -157,4 +157,15 @@ export function getDeliverySchedule(region: Region, now?: Date): DeliveryInfo {
     : getSeoulSchedule(currentTime);
 }
 
+/**
+ * 주어진 주문의 출고일 기준으로 현재 마감이 지났는지 판단
+ * - 서울: 출고 전일 17시
+ * - 제주: 출고 전주 수요일 16시
+ */
+export function isPastDeadlineForOrder(region: Region, orderCreatedAt: Date, now?: Date): boolean {
+  const currentTime = now || new Date();
+  const schedule = getDeliverySchedule(region, orderCreatedAt);
+  return currentTime >= schedule.deadlineDate;
+}
+
 export type { DeliveryInfo, Region };

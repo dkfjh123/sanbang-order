@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
+import { getDeliverySchedule } from '@/lib/delivery-schedule';
 
 // 주문 수정 (수량 변경)
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -20,7 +21,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   // 주문 조회
   const { data: order } = await adminSupabase
     .from('orders')
-    .select('*')
+    .select('*, stores(region)')
     .eq('id', id)
     .single();
 
@@ -28,23 +29,33 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
   }
 
+  if (order.status !== 'pending') {
+    return NextResponse.json({ error: '대기 상태인 주문만 수정할 수 있습니다.' }, { status: 400 });
+  }
+
   // 권한 확인
   const { data: profile } = await adminSupabase
     .from('profiles')
-    .select('role')
+    .select('role, store_id')
     .eq('id', user.id)
     .single();
 
-  const isShinwa = profile?.role === 'shinwa';
+  const isAdmin = profile?.role === 'admin';
+  const isStore = profile?.role === 'store';
 
-  // 신화푸드는 대기+확인 상태에서 수정 가능, 나머지는 대기만
-  if (isShinwa) {
-    if (order.status !== 'pending' && order.status !== 'confirmed') {
-      return NextResponse.json({ error: '대기 또는 확인 상태인 주문만 수정할 수 있습니다.' }, { status: 400 });
-    }
-  } else {
-    if (order.status !== 'pending') {
-      return NextResponse.json({ error: '대기 상태인 주문만 수정할 수 있습니다.' }, { status: 400 });
+  // 신화푸드: 수정 불가
+  if (profile?.role === 'shinwa') {
+    return NextResponse.json({ error: '수정 권한이 없습니다.' }, { status: 403 });
+  }
+
+  // 가맹점: 마감 후 수정 불가
+  if (isStore) {
+    const region = order.stores?.region as 'seoul' | 'jeju';
+    if (region) {
+      const schedule = getDeliverySchedule(region);
+      if (schedule.isPastDeadline) {
+        return NextResponse.json({ error: '발주 마감 후에는 수정할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
+      }
     }
   }
 
@@ -79,6 +90,12 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: '예치금이 부족합니다.' }, { status: 400 });
   }
 
+  // 기존 항목 조회 (재고 조정용)
+  const { data: oldItems } = await adminSupabase
+    .from('order_items')
+    .select('product_id, quantity')
+    .eq('order_id', id);
+
   // 기존 항목 삭제 후 새로 삽입
   await adminSupabase.from('order_items').delete().eq('order_id', id);
 
@@ -106,6 +123,56 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
   // 주문 총액 업데이트
   await adminSupabase.from('orders').update({ total_amount: newTotal }).eq('id', id);
+
+  // 재고 조정: 기존 수량과 새 수량의 차이만큼 반영
+  if (oldItems) {
+    const oldQtyMap: Record<string, number> = {};
+    for (const oi of oldItems) {
+      oldQtyMap[oi.product_id] = (oldQtyMap[oi.product_id] || 0) + oi.quantity;
+    }
+    const newQtyMap: Record<string, number> = {};
+    for (const ni of items as { product_id: string; quantity: number }[]) {
+      newQtyMap[ni.product_id] = (newQtyMap[ni.product_id] || 0) + ni.quantity;
+    }
+
+    // 모든 관련 product_id 수집
+    const allProductIds = [...new Set([...Object.keys(oldQtyMap), ...Object.keys(newQtyMap)])];
+
+    for (const productId of allProductIds) {
+      const oldQty = oldQtyMap[productId] || 0;
+      const newQty = newQtyMap[productId] || 0;
+      const qtyDiff = newQty - oldQty; // 양수: 추가 차감 필요, 음수: 복구 필요
+
+      if (qtyDiff === 0) continue;
+
+      const { data: inv } = await adminSupabase
+        .from('inventory')
+        .select('quantity')
+        .eq('product_id', productId)
+        .single();
+
+      if (inv) {
+        const updatedQty = inv.quantity - qtyDiff;
+        if (updatedQty < 0) {
+          return NextResponse.json({ error: '재고가 부족하여 수량을 변경할 수 없습니다.' }, { status: 400 });
+        }
+        await adminSupabase
+          .from('inventory')
+          .update({ quantity: updatedQty })
+          .eq('product_id', productId);
+
+        await adminSupabase
+          .from('inventory_transactions')
+          .insert({
+            product_id: productId,
+            type: qtyDiff > 0 ? 'outbound' : 'inbound',
+            quantity: -qtyDiff,
+            description: `발주 수정 (${order.order_number}) - ${qtyDiff > 0 ? '추가 출고' : '수량 감소 복구'}`,
+            created_by: user.id,
+          });
+      }
+    }
+  }
 
   // 예치금 차이 반영 (직영점 제외)
   if (!store.is_direct && diff !== 0) {
@@ -142,7 +209,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 
   const { data: order } = await adminSupabase
     .from('orders')
-    .select('*')
+    .select('*, stores(region)')
     .eq('id', id)
     .single();
 
@@ -152,6 +219,29 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 
   if (order.status !== 'pending') {
     return NextResponse.json({ error: '대기 상태인 주문만 취소할 수 있습니다.' }, { status: 400 });
+  }
+
+  // 권한 확인
+  const { data: profile } = await adminSupabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single();
+
+  // 신화푸드: 취소 불가
+  if (profile?.role === 'shinwa') {
+    return NextResponse.json({ error: '취소 권한이 없습니다.' }, { status: 403 });
+  }
+
+  // 가맹점: 마감 후 취소 불가
+  if (profile?.role === 'store') {
+    const region = order.stores?.region as 'seoul' | 'jeju';
+    if (region) {
+      const schedule = getDeliverySchedule(region);
+      if (schedule.isPastDeadline) {
+        return NextResponse.json({ error: '발주 마감 후에는 취소할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
+      }
+    }
   }
 
   // 주문 취소 처리

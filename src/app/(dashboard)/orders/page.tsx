@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { getDeliverySchedule } from '@/lib/delivery-schedule';
 import type { Profile } from '@/types';
 
 interface Order {
@@ -37,8 +38,7 @@ interface OrderLog {
 
 const statusLabel: Record<string, { text: string; color: string }> = {
   pending: { text: '대기', color: 'bg-yellow-100 text-yellow-700' },
-  confirmed: { text: '확인', color: 'bg-blue-100 text-blue-700' },
-  delivered: { text: '완료', color: 'bg-green-100 text-green-700' },
+  confirmed: { text: '확정', color: 'bg-green-100 text-green-700' },
   cancelled: { text: '취소', color: 'bg-red-100 text-red-700' },
 };
 
@@ -144,7 +144,7 @@ export default function OrdersPage() {
 
   const handleSaveEdit = async () => {
     if (!selectedOrder) return;
-    if (profile?.role === 'shinwa' && !editReason.trim()) {
+    if (!editReason.trim()) {
       alert('수정 사유를 입력해주세요.');
       return;
     }
@@ -247,8 +247,7 @@ export default function OrdersPage() {
         {[
           ['all', '전체'],
           ['pending', '대기'],
-          ['confirmed', '확인'],
-          ['delivered', '완료'],
+          ['confirmed', '확정'],
           ['cancelled', '취소'],
         ].map(([key, label]) => (
           <button
@@ -357,29 +356,28 @@ export default function OrdersPage() {
               )}
             </div>
 
-            {/* 수정/취소 버튼 (대기 상태, 관리자 또는 가맹점 본인) */}
-            {selectedOrder.status === 'pending' && !editMode && (profile?.role === 'admin' || profile?.role === 'store') && (
-              <div className="flex gap-2 mb-4">
-                <button onClick={() => setEditMode(true)}
-                  className="flex-1 py-2.5 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition">
-                  수량 수정
-                </button>
-                <button onClick={() => handleCancelOrder(selectedOrder.id)} disabled={cancelling}
-                  className="flex-1 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition disabled:opacity-50">
-                  {cancelling ? '처리 중...' : '주문 취소'}
-                </button>
-              </div>
-            )}
-
-            {/* 신화푸드 수정 버튼 (대기/확인 상태에서 가능) */}
-            {(selectedOrder.status === 'pending' || selectedOrder.status === 'confirmed') && !editMode && profile?.role === 'shinwa' && (
-              <div className="mb-4">
-                <button onClick={() => setEditMode(true)}
-                  className="w-full py-2.5 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition">
-                  수량 수정 (재고 조정)
-                </button>
-              </div>
-            )}
+            {/* 수정/취소 버튼 */}
+            {selectedOrder.status === 'pending' && !editMode && (() => {
+              const isAdmin = profile?.role === 'admin';
+              const isStore = profile?.role === 'store';
+              // 가맹점: 마감 전에만 수정/취소 가능
+              const region = selectedOrder.stores?.region as 'seoul' | 'jeju' | undefined;
+              const isPastDeadline = region ? getDeliverySchedule(region).isPastDeadline : false;
+              const canEdit = isAdmin || (isStore && !isPastDeadline);
+              if (!canEdit) return null;
+              return (
+                <div className="flex gap-2 mb-4">
+                  <button onClick={() => setEditMode(true)}
+                    className="flex-1 py-2.5 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition">
+                    수량 수정
+                  </button>
+                  <button onClick={() => handleCancelOrder(selectedOrder.id)} disabled={cancelling}
+                    className="flex-1 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition disabled:opacity-50">
+                    {cancelling ? '처리 중...' : '주문 취소'}
+                  </button>
+                </div>
+              );
+            })()}
 
             {/* 주문 상품 */}
             <div className="border-t border-gray-200 pt-3">
@@ -414,7 +412,7 @@ export default function OrdersPage() {
                   {/* 수정 사유 (신화푸드 필수) */}
                   <div className="mt-3">
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      수정 사유 {profile?.role === 'shinwa' && <span className="text-red-500">*</span>}
+                      수정 사유 <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="text"
@@ -469,24 +467,14 @@ export default function OrdersPage() {
               </div>
             )}
 
-            {/* 상태 변경 */}
-            {!editMode && selectedOrder.status !== 'cancelled' && selectedOrder.status !== 'delivered' && (
+            {/* 상태 변경 — 관리자만 */}
+            {!editMode && selectedOrder.status === 'pending' && profile?.role === 'admin' && (
               <div className="mt-4 pt-4 border-t border-gray-200">
                 <p className="text-sm text-gray-500 mb-2">상태 변경</p>
-                <div className="flex flex-wrap gap-2">
-                  {selectedOrder.status === 'pending' && (profile?.role === 'admin' || profile?.role === 'shinwa') && (
-                    <button onClick={() => updateStatus(selectedOrder.id, 'confirmed')}
-                      className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
-                      발주 확정
-                    </button>
-                  )}
-                  {selectedOrder.status === 'confirmed' && (profile?.role === 'admin' || profile?.role === 'shinwa') && (
-                    <button onClick={() => updateStatus(selectedOrder.id, 'delivered')}
-                      className="flex-1 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
-                      배송 완료
-                    </button>
-                  )}
-                </div>
+                <button onClick={() => updateStatus(selectedOrder.id, 'confirmed')}
+                  className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
+                  발주 확정
+                </button>
               </div>
             )}
 

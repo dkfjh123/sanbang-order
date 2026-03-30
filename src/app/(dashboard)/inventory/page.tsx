@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import PasswordConfirmModal from '@/components/PasswordConfirmModal';
 
 interface InventoryItem {
   id: string;
@@ -12,6 +13,7 @@ interface InventoryItem {
     spec: string | null;
     unit: string;
     storage: string | null;
+    product_type: string;
     cost_price_with_tax: number;
     price_with_tax: number;
   };
@@ -44,6 +46,7 @@ export default function InventoryPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [txFilter, setTxFilter] = useState('');
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
   const supabase = createClient();
 
   useEffect(() => {
@@ -53,7 +56,7 @@ export default function InventoryPage() {
   async function loadData() {
     const { data: inv } = await supabase
       .from('inventory')
-      .select('*, products(name, spec, unit, storage, cost_price_with_tax, price_with_tax)')
+      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax)')
       .order('product_id');
     setItems((inv as InventoryItem[]) || []);
 
@@ -69,20 +72,31 @@ export default function InventoryPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaving(true);
-    setError('');
 
     const qty = Number(txQty);
     if (!selectedProduct || qty <= 0) {
       setError('상품과 수량을 입력해주세요.');
-      setSaving(false);
       return;
     }
 
+    // 전용상품이면 비밀번호 확인 필요
+    const item = items.find((i) => i.product_id === selectedProduct);
+    if (item?.products?.product_type === 'exclusive') {
+      setShowPasswordModal(true);
+      return;
+    }
+
+    await doSave();
+  };
+
+  const doSave = async () => {
+    setSaving(true);
+    setError('');
+
+    const qty = Number(txQty);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    // 현재 재고 조회
     const item = items.find((i) => i.product_id === selectedProduct);
     if (!item) { setError('상품을 찾을 수 없습니다.'); setSaving(false); return; }
 
@@ -114,6 +128,7 @@ export default function InventoryPage() {
 
     setSaving(false);
     setShowModal(false);
+    setShowPasswordModal(false);
     setTxQty('');
     setTxDesc('');
     loadData();
@@ -321,6 +336,15 @@ export default function InventoryPage() {
                 </button>
               </div>
             </form>
+
+            {showPasswordModal && (
+              <PasswordConfirmModal
+                title="비밀번호 확인"
+                message="전용상품 재고 변경은 비밀번호 확인이 필요합니다."
+                onConfirm={() => { setShowPasswordModal(false); doSave(); }}
+                onCancel={() => setShowPasswordModal(false)}
+              />
+            )}
           </div>
         </div>
       )}
