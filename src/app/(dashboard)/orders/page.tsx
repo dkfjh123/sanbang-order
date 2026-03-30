@@ -296,7 +296,7 @@ export default function OrdersPage() {
                   </span>
                 </div>
                 <span className="font-bold text-gray-800">
-                  ₩{storeOrders.reduce((sum, o) => sum + o.total_amount, 0).toLocaleString()}
+                  ₩{storeOrders.filter((o) => o.status !== 'cancelled').reduce((sum, o) => sum + o.total_amount, 0).toLocaleString()}
                 </span>
               </div>
               <div className="divide-y divide-gray-100">
@@ -326,8 +326,8 @@ export default function OrdersPage() {
 
       {/* 주문 상세 모달 */}
       {selectedOrder && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => { if (!editMode) setSelectedOrder(null); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-800">{selectedOrder.order_number}</h3>
               <button onClick={() => setSelectedOrder(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>

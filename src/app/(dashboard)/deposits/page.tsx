@@ -160,21 +160,22 @@ export default function DepositsPage() {
         </div>
       )}
 
-      {/* 가맹점 선택 */}
-      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
-        <label className="block text-sm font-medium text-gray-700 mb-2">가맹점 선택</label>
-        <select
-          value={selectedStoreId}
-          onChange={(e) => setSelectedStoreId(e.target.value)}
-          disabled={profile?.role === 'store'}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
-        >
-          <option value="">선택하세요</option>
-          {stores.map((s) => (
-            <option key={s.id} value={s.id}>{s.short_name || s.name}</option>
-          ))}
-        </select>
-      </div>
+      {/* 가맹점 선택 (관리자만) */}
+      {profile?.role === 'admin' && (
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+          <label className="block text-sm font-medium text-gray-700 mb-2">가맹점 선택</label>
+          <select
+            value={selectedStoreId}
+            onChange={(e) => setSelectedStoreId(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+          >
+            <option value="">선택하세요</option>
+            {stores.map((s) => (
+              <option key={s.id} value={s.id}>{s.short_name || s.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* 잔액 표시 */}
       {selectedStore && (
@@ -376,8 +377,8 @@ function AdjustModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-bold text-gray-800">예치금 조정</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
@@ -524,8 +525,8 @@ function DepositRequestModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
         {success ? (
           <div className="text-center py-6">
             <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">

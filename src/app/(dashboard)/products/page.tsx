@@ -115,8 +115,13 @@ export default function ProductsPage() {
           {filtered.map((product) => (
             <div
               key={product.id}
-              className={`p-4 space-y-2 cursor-pointer hover:bg-gray-50 ${!product.is_active ? 'opacity-50' : ''}`}
-              onClick={() => setEditingProduct(product)}
+              className={`p-4 space-y-2 ${!product.is_active ? 'opacity-50' : ''} ${
+                profile?.role === 'shinwa' && product.product_type === 'exclusive' ? '' : 'cursor-pointer hover:bg-gray-50'
+              }`}
+              onClick={() => {
+                if (profile?.role === 'shinwa' && product.product_type === 'exclusive') return;
+                setEditingProduct(product);
+              }}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -184,12 +189,16 @@ export default function ProductsPage() {
                   <td className="px-4 py-3 text-right font-semibold text-gray-800">₩{product.price_with_tax.toLocaleString()}</td>
                   <td className="px-4 py-3 text-center">{product.is_tax_free ? '✅' : ''}</td>
                   <td className="px-4 py-3 text-center">
-                    <button
-                      onClick={() => setEditingProduct(product)}
-                      className="text-[#2D6A4F] hover:underline text-sm"
-                    >
-                      수정
-                    </button>
+                    {profile?.role === 'shinwa' && product.product_type === 'exclusive' ? (
+                      <span className="text-gray-300 text-sm">—</span>
+                    ) : (
+                      <button
+                        onClick={() => setEditingProduct(product)}
+                        className="text-[#2D6A4F] hover:underline text-sm"
+                      >
+                        수정
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -281,8 +290,8 @@ function AddProductModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-bold text-gray-800">범용상품 추가</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
@@ -477,8 +486,8 @@ function EditProductModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="text-lg font-bold text-gray-800">상품 수정</h3>

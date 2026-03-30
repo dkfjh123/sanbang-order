@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import PasswordConfirmModal from '@/components/PasswordConfirmModal';
 
@@ -47,9 +47,17 @@ export default function InventoryPage() {
   const [error, setError] = useState('');
   const [txFilter, setTxFilter] = useState('');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [userRole, setUserRole] = useState<string>('');
+  const txSectionRef = useRef<HTMLDivElement>(null);
   const supabase = createClient();
 
   useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }: { data: { user: { id: string } | null } }) => {
+      if (user) {
+        supabase.from('profiles').select('role').eq('id', user.id).single()
+          .then(({ data }: { data: { role: string } | null }) => { if (data) setUserRole(data.role); });
+      }
+    });
     loadData();
   }, []);
 
@@ -79,8 +87,15 @@ export default function InventoryPage() {
       return;
     }
 
-    // 전용상품이면 비밀번호 확인 필요
     const item = items.find((i) => i.product_id === selectedProduct);
+
+    // 신화: 전용상품 수정 차단
+    if (userRole === 'shinwa' && item?.products?.product_type === 'exclusive') {
+      setError('전용상품은 관리자만 수정할 수 있습니다.');
+      return;
+    }
+
+    // 전용상품이면 비밀번호 확인 필요 (어드민)
     if (item?.products?.product_type === 'exclusive') {
       setShowPasswordModal(true);
       return;
@@ -155,12 +170,14 @@ export default function InventoryPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800">재고 관리</h2>
-        <button
-          onClick={() => setShowModal(true)}
-          className="px-4 py-2 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition"
-        >
-          + 입/출고 등록
-        </button>
+        {(userRole === 'admin' || userRole === 'shinwa') && (
+          <button
+            onClick={() => setShowModal(true)}
+            className="px-4 py-2 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition"
+          >
+            {userRole === 'shinwa' ? '+ 범용상품 입/출고' : '+ 입/출고 등록'}
+          </button>
+        )}
       </div>
 
       {/* 재고 현황 카드 */}
@@ -189,7 +206,11 @@ export default function InventoryPage() {
                   <p className="text-xs text-gray-400">{item.products?.unit}</p>
                 </div>
                 <button
-                  onClick={() => { setSelectedProduct(item.product_id); setTxFilter(item.product_id); }}
+                  onClick={() => {
+                    setSelectedProduct(item.product_id);
+                    setTxFilter(item.product_id);
+                    setTimeout(() => txSectionRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                  }}
                   className="text-xs text-[#2D6A4F] hover:underline"
                 >
                   이력 보기
@@ -201,7 +222,7 @@ export default function InventoryPage() {
       </div>
 
       {/* 입출고 이력 */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div ref={txSectionRef} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
           <h3 className="font-semibold text-gray-700 text-sm">입출고 이력</h3>
           <div className="flex items-center gap-2">
@@ -253,8 +274,8 @@ export default function InventoryPage() {
 
       {/* 입/출고 등록 모달 */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-800">입/출고 등록</h3>
               <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600">✕</button>
@@ -290,7 +311,9 @@ export default function InventoryPage() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
                 >
                   <option value="">선택하세요</option>
-                  {items.map((item) => (
+                  {items
+                    .filter((item) => userRole !== 'shinwa' || item.products?.product_type === 'general')
+                    .map((item) => (
                     <option key={item.product_id} value={item.product_id}>
                       {item.products?.name} (현재: {item.quantity}{item.products?.unit})
                     </option>

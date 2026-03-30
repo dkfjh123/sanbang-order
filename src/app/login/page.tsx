@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
@@ -14,12 +14,10 @@ export default function LoginPage() {
   const router = useRouter();
 
   // 저장된 이메일 불러오기
-  useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('sanbang_email');
-      if (saved) setEmail(saved);
-    }
-  });
+  useEffect(() => {
+    const saved = localStorage.getItem('sanbang_email');
+    if (saved) setEmail(saved);
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -369,8 +369,8 @@ export default function NewOrderPage() {
         </div>
       )}
 
-      {/* 제주 파레트 현황 (제주 가맹점 선택 시 또는 관리자/신화) */}
-      {(store?.region === 'jeju' || profile?.role === 'admin' || profile?.role === 'shinwa') && (
+      {/* 제주 파레트 현황 (관리자/신화만) */}
+      {(profile?.role === 'admin' || profile?.role === 'shinwa') && (
         <div className={`rounded-xl p-4 shadow-sm border ${
           jejuPalletBoxes >= JEJU_PALLET_MIN
             ? 'bg-green-50 border-green-200'
@@ -471,6 +471,9 @@ export default function NewOrderPage() {
                   {product.is_tax_free && <span className="ml-1 text-base text-green-600">(면세)</span>}
                 </p>
                 {outOfStock && <p className="text-red-500 font-bold text-sm mt-1">품절</p>}
+                {!outOfStock && stock !== null && qty >= stock && qty > 0 && profile?.role !== 'store' && (
+                  <p className="text-orange-500 font-medium text-sm mt-1">최대 주문 가능 수량: {stock}개</p>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 <button
@@ -498,8 +501,8 @@ export default function NewOrderPage() {
 
       {/* 결과 모달 */}
       {result && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-8 text-center">
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setResult(null)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-8 text-center" onClick={(e) => e.stopPropagation()}>
             {result.success ? (
               <>
                 <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -540,11 +543,35 @@ export default function NewOrderPage() {
               </>
             ) : (
               <>
-                <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <span className="text-3xl">❌</span>
+                {result.message.includes('재고') ? (
+                  <div className="w-16 h-16 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <span className="text-3xl">📦</span>
+                  </div>
+                ) : result.message.includes('예치금') ? (
+                  <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <span className="text-3xl">💰</span>
+                  </div>
+                ) : (
+                  <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <span className="text-3xl">⚠️</span>
+                  </div>
+                )}
+                <h3 className="text-xl font-bold text-gray-800 mb-2">
+                  {result.message.includes('재고') ? '재고 부족' : result.message.includes('예치금') ? '예치금 부족' : '발주 실패'}
+                </h3>
+                <div className={`rounded-lg px-4 py-3 mb-6 text-left text-sm ${
+                  result.message.includes('재고') ? 'bg-orange-50 text-orange-800' :
+                  result.message.includes('예치금') ? 'bg-red-50 text-red-700' :
+                  'bg-gray-50 text-gray-700'
+                }`}>
+                  <p>{result.message}</p>
+                  {result.message.includes('예치금') && (
+                    <p className="mt-2 text-xs font-medium">관리자에게 예치금 충전을 요청해주세요.</p>
+                  )}
+                  {result.message.includes('재고') && (
+                    <p className="mt-2 text-xs font-medium">해당 상품의 수량을 줄이거나, 관리자에게 문의해주세요.</p>
+                  )}
                 </div>
-                <h3 className="text-xl font-bold text-gray-800 mb-2">발주 실패</h3>
-                <p className="text-red-600 mb-6">{result.message}</p>
                 <button
                   onClick={() => setResult(null)}
                   className="w-full py-3 bg-[#1B4332] text-white rounded-xl font-medium hover:bg-[#2D6A4F] transition"
@@ -641,7 +668,13 @@ export default function NewOrderPage() {
                 disabled={submitting || totalAmount < MIN_ORDER_AMOUNT || (!store?.is_direct && !!store && store.deposit_balance < totalAmount)}
                 className="px-8 py-3 bg-[#1B4332] text-white rounded-xl font-bold text-lg hover:bg-[#2D6A4F] transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {submitting ? '처리 중...' : totalAmount < MIN_ORDER_AMOUNT ? `₩${MIN_ORDER_AMOUNT.toLocaleString()} 이상 주문` : '발주하기'}
+                {submitting
+                  ? '처리 중...'
+                  : totalAmount < MIN_ORDER_AMOUNT
+                    ? `₩${MIN_ORDER_AMOUNT.toLocaleString()} 이상`
+                    : !store?.is_direct && !!store && store.deposit_balance < totalAmount
+                      ? `예치금 부족 (₩${(totalAmount - store.deposit_balance).toLocaleString()} 이상 충전 필요)`
+                      : '발주하기'}
               </button>
             </div>
           </div>

@@ -46,7 +46,7 @@ export default function SettlementPage() {
   async function loadData() {
     setLoading(true);
 
-    // 해당 월의 배송완료/확정 주문 조회 (출고일 = created_at 기준, 추후 delivery_date로 변경 가능)
+    // 해당 월의 확정 주문 조회 — 출고일(ship_date) 기준
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const endDate = month === 12
       ? `${year + 1}-01-01`
@@ -55,10 +55,10 @@ export default function SettlementPage() {
     const { data: orderData } = await supabase
       .from('orders')
       .select('*, stores(name, short_name, is_direct), order_items(*)')
-      .in('status', ['confirmed', 'shipping', 'delivered'])
-      .gte('created_at', startDate)
-      .lt('created_at', endDate)
-      .order('created_at');
+      .in('status', ['confirmed'])
+      .gte('ship_date', startDate)
+      .lt('ship_date', endDate)
+      .order('ship_date');
 
     setOrders((orderData as OrderWithItems[]) || []);
 
