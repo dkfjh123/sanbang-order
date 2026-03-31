@@ -468,14 +468,30 @@ export default function OrdersPage() {
             )}
 
             {/* 상태 변경 — 관리자 + 신화푸드 */}
-            {!editMode && selectedOrder.status === 'pending' && (profile?.role === 'admin' || profile?.role === 'shinwa') && (
-              <div className="mt-4 pt-4 border-t border-gray-200">
-                <p className="text-sm text-gray-500 mb-2">상태 변경</p>
-                <button onClick={() => updateStatus(selectedOrder.id, 'confirmed')}
-                  className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
-                  발주 확정
-                </button>
-              </div>
+            {!editMode && (profile?.role === 'admin' || profile?.role === 'shinwa') && (
+              <>
+                {selectedOrder.status === 'pending' && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <p className="text-sm text-gray-500 mb-2">상태 변경</p>
+                    <button onClick={() => updateStatus(selectedOrder.id, 'confirmed')}
+                      className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
+                      발주 확정
+                    </button>
+                  </div>
+                )}
+                {selectedOrder.status === 'confirmed' && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <p className="text-sm text-gray-500 mb-2">상태 변경</p>
+                    <button onClick={() => {
+                      if (!confirm('발주 확정을 취소하시겠습니까?\n상태가 대기로 되돌아갑니다.')) return;
+                      updateStatus(selectedOrder.id, 'pending');
+                    }}
+                      className="w-full py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600">
+                      확정 취소 (대기로 되돌리기)
+                    </button>
+                  </div>
+                )}
+              </>
             )}
 
             {/* 변경 이력 */}

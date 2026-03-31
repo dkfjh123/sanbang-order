@@ -175,7 +175,11 @@ export default function NewOrderPage() {
 
   const getQty = (productId: string) => cart.find((c) => c.product.id === productId)?.quantity || 0;
   const getStock = (productId: string): number | null => {
-    return productId in inventory ? inventory[productId] : null;
+    if (productId in inventory) return inventory[productId];
+    // 전용상품은 재고 레코드가 없으면 0 (품절)
+    const product = products.find((p) => p.id === productId);
+    if (product?.product_type === 'exclusive') return 0;
+    return null;
   };
   const isOutOfStock = (productId: string): boolean => {
     const stock = getStock(productId);

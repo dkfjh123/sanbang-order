@@ -62,11 +62,39 @@ export default function InventoryPage() {
   }, []);
 
   async function loadData() {
+    // 기존 inventory 레코드 로드
     const { data: inv } = await supabase
       .from('inventory')
       .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax)')
       .order('product_id');
-    setItems((inv as InventoryItem[]) || []);
+    const existingItems = (inv as InventoryItem[]) || [];
+    const existingProductIds = new Set(existingItems.map((i) => i.product_id));
+
+    // 전용상품 중 inventory 레코드가 없는 상품도 표시 (재고 0)
+    const { data: exclusiveProducts } = await supabase
+      .from('products')
+      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax')
+      .eq('product_type', 'exclusive')
+      .eq('is_active', true);
+
+    const missingItems: InventoryItem[] = (exclusiveProducts || [])
+      .filter((p: { id: string }) => !existingProductIds.has(p.id))
+      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number }) => ({
+        id: `virtual-${p.id}`,
+        product_id: p.id,
+        quantity: 0,
+        products: {
+          name: p.name,
+          spec: p.spec,
+          unit: p.unit,
+          storage: p.storage,
+          product_type: p.product_type,
+          cost_price_with_tax: p.cost_price_with_tax,
+          price_with_tax: p.price_with_tax,
+        },
+      }));
+
+    setItems([...existingItems, ...missingItems]);
 
     const { data: txs } = await supabase
       .from('inventory_transactions')
@@ -124,13 +152,20 @@ export default function InventoryPage() {
       return;
     }
 
-    // 재고 업데이트
-    const { error: updateErr } = await supabase
-      .from('inventory')
-      .update({ quantity: newQty })
-      .eq('product_id', selectedProduct);
-
-    if (updateErr) { setError(updateErr.message); setSaving(false); return; }
+    // 재고 레코드가 없으면 생성 (virtual 아이템)
+    const isVirtual = item.id.startsWith('virtual-');
+    if (isVirtual) {
+      const { error: insertErr } = await supabase
+        .from('inventory')
+        .insert({ product_id: selectedProduct, quantity: newQty });
+      if (insertErr) { setError(insertErr.message); setSaving(false); return; }
+    } else {
+      const { error: updateErr } = await supabase
+        .from('inventory')
+        .update({ quantity: newQty })
+        .eq('product_id', selectedProduct);
+      if (updateErr) { setError(updateErr.message); setSaving(false); return; }
+    }
 
     // 이력 기록
     await supabase.from('inventory_transactions').insert({

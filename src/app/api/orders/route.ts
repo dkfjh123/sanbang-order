@@ -67,21 +67,27 @@ export async function POST(request: Request) {
     }, { status: 400 });
   }
 
-  // 재고 확인 (inventory에 등록된 상품만)
+  // 재고 확인
   const productIds = items.map((item: { product_id: string }) => item.product_id);
   const { data: inventoryData } = await adminSupabase
     .from('inventory')
     .select('product_id, quantity, products(name)')
     .in('product_id', productIds);
 
-  if (inventoryData && inventoryData.length > 0) {
-    for (const item of items as { product_id: string; product_name: string; quantity: number }[]) {
-      const inv = inventoryData.find((i: { product_id: string }) => i.product_id === item.product_id);
-      if (inv && inv.quantity < item.quantity) {
+  for (const item of items as { product_id: string; product_name: string; product_type: string; quantity: number }[]) {
+    const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id);
+    if (inv) {
+      // 재고 레코드 있음 → 수량 체크
+      if (inv.quantity < item.quantity) {
         return NextResponse.json({
           error: `${item.product_name} 재고가 부족합니다. (현재: ${inv.quantity}개, 주문: ${item.quantity}개)`,
         }, { status: 400 });
       }
+    } else if (item.product_type === 'exclusive') {
+      // 전용상품인데 재고 레코드 없음 → 품절
+      return NextResponse.json({
+        error: `${item.product_name} 재고가 등록되지 않았습니다. 관리자에게 문의하세요.`,
+      }, { status: 400 });
     }
   }
 
