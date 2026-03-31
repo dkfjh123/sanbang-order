@@ -323,27 +323,44 @@ function AddProductModal({
             </select>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">공급가 (원)</label>
-              <input
-                type="number"
-                value={form.price}
-                onChange={(e) => setForm({ ...form, price: e.target.value })}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">부가세포함 (원)</label>
-              <input
-                type="number"
-                value={form.price_with_tax}
-                onChange={(e) => setForm({ ...form, price_with_tax: e.target.value })}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
-              />
-            </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={form.is_tax_free}
+              onChange={(e) => {
+                const isTaxFree = e.target.checked;
+                const total = Number(form.price_with_tax);
+                const supply = isTaxFree ? total : Math.round(total / 1.1);
+                setForm({ ...form, is_tax_free: isTaxFree, price: String(supply) });
+              }}
+              className="w-4 h-4"
+            />
+            면세 상품
+          </label>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">금액 (원)</label>
+            <input
+              type="number"
+              value={form.price_with_tax}
+              onChange={(e) => {
+                const total = Number(e.target.value);
+                const supply = form.is_tax_free ? total : Math.round(total / 1.1);
+                setForm({ ...form, price_with_tax: e.target.value, price: String(supply) });
+              }}
+              required
+              placeholder="총 금액 입력"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+            />
+            {form.price_with_tax && (
+              <div className="mt-1.5 text-xs text-gray-500 flex gap-3">
+                <span>공급가: ₩{Number(form.price).toLocaleString()}</span>
+                {!form.is_tax_free && (
+                  <span>부가세: ₩{(Number(form.price_with_tax) - Number(form.price)).toLocaleString()}</span>
+                )}
+                {form.is_tax_free && <span className="text-blue-600">면세</span>}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -381,16 +398,6 @@ function AddProductModal({
               <option value="frozen">냉동</option>
             </select>
           </div>
-
-          <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input
-              type="checkbox"
-              checked={form.is_tax_free}
-              onChange={(e) => setForm({ ...form, is_tax_free: e.target.checked })}
-              className="w-4 h-4"
-            />
-            면세 상품
-          </label>
 
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">{error}</div>
@@ -532,27 +539,53 @@ function EditProductModal({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">공급가 (원)</label>
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 text-sm text-gray-700">
               <input
-                type="number"
-                value={form.price}
-                onChange={(e) => setForm({ ...form, price: Number(e.target.value) })}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+                type="checkbox"
+                checked={form.is_tax_free}
+                onChange={(e) => {
+                  const isTaxFree = e.target.checked;
+                  const supply = isTaxFree ? form.price_with_tax : Math.round(form.price_with_tax / 1.1);
+                  setForm({ ...form, is_tax_free: isTaxFree, price: supply });
+                }}
+                className="w-4 h-4"
               />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">부가세포함 (원)</label>
+              면세 상품
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
               <input
-                type="number"
-                value={form.price_with_tax}
-                onChange={(e) => setForm({ ...form, price_with_tax: Number(e.target.value) })}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+                type="checkbox"
+                checked={form.is_active}
+                onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
+                className="w-4 h-4"
               />
-            </div>
+              판매 중
+            </label>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">금액 (원)</label>
+            <input
+              type="number"
+              value={form.price_with_tax}
+              onChange={(e) => {
+                const total = Number(e.target.value);
+                const supply = form.is_tax_free ? total : Math.round(total / 1.1);
+                setForm({ ...form, price_with_tax: total, price: supply });
+              }}
+              required
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+            />
+            {form.price_with_tax > 0 && (
+              <div className="mt-1.5 text-xs text-gray-500 flex gap-3">
+                <span>공급가: ₩{form.price.toLocaleString()}</span>
+                {!form.is_tax_free && (
+                  <span>부가세: ₩{(form.price_with_tax - form.price).toLocaleString()}</span>
+                )}
+                {form.is_tax_free && <span className="text-blue-600">면세</span>}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -587,27 +620,6 @@ function EditProductModal({
               <option value="refrigerated">냉장</option>
               <option value="frozen">냉동</option>
             </select>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={form.is_tax_free}
-                onChange={(e) => setForm({ ...form, is_tax_free: e.target.checked })}
-                className="w-4 h-4"
-              />
-              면세 상품
-            </label>
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={form.is_active}
-                onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
-                className="w-4 h-4"
-              />
-              판매 중
-            </label>
           </div>
 
           {error && (
