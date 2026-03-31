@@ -467,8 +467,8 @@ export default function OrdersPage() {
               </div>
             )}
 
-            {/* 상태 변경 — 관리자만 */}
-            {!editMode && selectedOrder.status === 'pending' && profile?.role === 'admin' && (
+            {/* 상태 변경 — 관리자 + 신화푸드 */}
+            {!editMode && selectedOrder.status === 'pending' && (profile?.role === 'admin' || profile?.role === 'shinwa') && (
               <div className="mt-4 pt-4 border-t border-gray-200">
                 <p className="text-sm text-gray-500 mb-2">상태 변경</p>
                 <button onClick={() => updateStatus(selectedOrder.id, 'confirmed')}

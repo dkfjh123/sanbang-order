@@ -840,7 +840,7 @@ function OrderList({ orders }: { orders: OrderSummary[] }) {
         const st = statusLabel[order.status] || { text: order.status, color: 'text-gray-600 bg-gray-100' };
         const stName = order.stores ? (order.stores.short_name || order.stores.name) : '';
         return (
-          <div key={order.id} className="px-4 py-3 flex items-center justify-between">
+          <a key={order.id} href="/orders" className="px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition cursor-pointer block">
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold text-gray-800">{order.order_number}</span>
@@ -854,7 +854,7 @@ function OrderList({ orders }: { orders: OrderSummary[] }) {
               </div>
             </div>
             <span className="text-sm font-bold text-gray-800">₩{order.total_amount.toLocaleString()}</span>
-          </div>
+          </a>
         );
       })}
     </div>

@@ -434,6 +434,7 @@ function EditProductModal({
     is_active: product.is_active,
   });
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const supabase = createClient();
@@ -479,6 +480,27 @@ function EditProductModal({
     if (updateError) {
       setError(updateError.message);
       setLoading(false);
+      return;
+    }
+
+    onSaved();
+  };
+
+  const handleDelete = async () => {
+    if (!confirm('이 상품을 삭제하시겠습니까?\n삭제된 상품은 복구할 수 없습니다.')) return;
+    setDeleting(true);
+    setError('');
+
+    const { error: deleteError } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', product.id);
+
+    if (deleteError) {
+      setError(deleteError.message.includes('violates foreign key')
+        ? '이미 발주에 사용된 상품은 삭제할 수 없습니다. 판매중지를 이용해주세요.'
+        : deleteError.message);
+      setDeleting(false);
       return;
     }
 
@@ -610,6 +632,18 @@ function EditProductModal({
               {loading ? '저장 중...' : '저장'}
             </button>
           </div>
+
+          {/* 범용상품 삭제 버튼 */}
+          {product.product_type === 'general' && (
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={deleting}
+              className="w-full mt-2 py-2 text-red-600 border border-red-300 rounded-lg text-sm hover:bg-red-50 transition disabled:opacity-50"
+            >
+              {deleting ? '삭제 중...' : '이 상품 삭제'}
+            </button>
+          )}
         </form>
 
         {showPasswordModal && (
