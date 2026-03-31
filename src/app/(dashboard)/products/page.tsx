@@ -339,26 +339,33 @@ function AddProductModal({
           </label>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">금액 (원)</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">부가세 포함가 입력 (원)</label>
             <input
-              type="number"
-              value={form.price_with_tax}
+              type="text"
+              inputMode="numeric"
+              value={form.price_with_tax || ''}
               onChange={(e) => {
-                const total = Number(e.target.value);
+                const val = e.target.value.replace(/[^0-9]/g, '');
+                const total = Number(val) || 0;
                 const supply = form.is_tax_free ? total : Math.round(total / 1.1);
-                setForm({ ...form, price_with_tax: e.target.value, price: String(supply) });
+                setForm({ ...form, price_with_tax: val, price: String(supply) });
               }}
               required
               placeholder="총 금액 입력"
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
             />
             {form.price_with_tax && (
-              <div className="mt-1.5 text-xs text-gray-500 flex gap-3">
-                <span>공급가: ₩{Number(form.price).toLocaleString()}</span>
-                {!form.is_tax_free && (
-                  <span>부가세: ₩{(Number(form.price_with_tax) - Number(form.price)).toLocaleString()}</span>
-                )}
-                {form.is_tax_free && <span className="text-blue-600">면세</span>}
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-xs text-gray-500">공급가</p>
+                  <p className="text-sm font-semibold text-gray-800">₩{Number(form.price).toLocaleString()}</p>
+                </div>
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-xs text-gray-500">부가세</p>
+                  <p className="text-sm font-semibold text-gray-800">
+                    {form.is_tax_free ? '면세' : `₩${(Number(form.price_with_tax) - Number(form.price)).toLocaleString()}`}
+                  </p>
+                </div>
               </div>
             )}
           </div>
@@ -565,25 +572,33 @@ function EditProductModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">금액 (원)</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">부가세 포함가 입력 (원)</label>
             <input
-              type="number"
-              value={form.price_with_tax}
+              type="text"
+              inputMode="numeric"
+              value={form.price_with_tax || ''}
               onChange={(e) => {
-                const total = Number(e.target.value);
+                const val = e.target.value.replace(/[^0-9]/g, '');
+                const total = Number(val) || 0;
                 const supply = form.is_tax_free ? total : Math.round(total / 1.1);
                 setForm({ ...form, price_with_tax: total, price: supply });
               }}
               required
+              placeholder="총 금액 입력"
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
             />
             {form.price_with_tax > 0 && (
-              <div className="mt-1.5 text-xs text-gray-500 flex gap-3">
-                <span>공급가: ₩{form.price.toLocaleString()}</span>
-                {!form.is_tax_free && (
-                  <span>부가세: ₩{(form.price_with_tax - form.price).toLocaleString()}</span>
-                )}
-                {form.is_tax_free && <span className="text-blue-600">면세</span>}
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-xs text-gray-500">공급가</p>
+                  <p className="text-sm font-semibold text-gray-800">₩{form.price.toLocaleString()}</p>
+                </div>
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-xs text-gray-500">부가세</p>
+                  <p className="text-sm font-semibold text-gray-800">
+                    {form.is_tax_free ? '면세' : `₩${(form.price_with_tax - form.price).toLocaleString()}`}
+                  </p>
+                </div>
               </div>
             )}
           </div>
