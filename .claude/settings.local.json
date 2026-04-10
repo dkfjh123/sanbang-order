@@ -3,7 +3,12 @@
     "allow": [
       "mcp__supabase__list_projects",
       "Bash(ls \"c:\\\\Users\\\\dkfjh\\\\dev\\\\산방식당발주프로그램\\\\web\\\\src\\\\app\\\\\\(dashboard\\)\\\\orders\"\")",
-      "Bash(ls \"c:/Users/dkfjh/dev/산방식당발주프로그램/web/src/app/\\(dashboard\\)/orders/\")"
+      "Bash(ls \"c:/Users/dkfjh/dev/산방식당발주프로그램/web/src/app/\\(dashboard\\)/orders/\")",
+      "Bash(npm ls:*)",
+      "Bash(npm install:*)",
+      "Bash(for f:*)",
+      "Bash(do basename:*)",
+      "Bash(done)"
     ],
     "additionalDirectories": [
       "c:\\Users\\dkfjh\\dev\\산방식당발주프로그램\\web\\src\\app\\statement"
