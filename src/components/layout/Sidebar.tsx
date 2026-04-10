@@ -56,8 +56,8 @@ export default function Sidebar({
       )}
 
       <aside
-        className={`fixed top-0 left-0 z-50 h-full w-64 bg-sidebar-bg text-sidebar-text flex flex-col transition-transform duration-200 lg:relative lg:translate-x-0 lg:z-auto lg:shrink-0 ${
-          open ? 'translate-x-0' : '-translate-x-full'
+        className={`max-lg:fixed max-lg:top-0 max-lg:left-0 max-lg:z-50 max-lg:transition-transform max-lg:duration-200 h-full w-64 shrink-0 bg-sidebar-bg text-sidebar-text flex flex-col ${
+          open ? 'max-lg:translate-x-0' : 'max-lg:-translate-x-full'
         }`}
       >
         {/* 로고 영역 */}
