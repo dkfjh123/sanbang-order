@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import PasswordConfirmModal from '@/components/PasswordConfirmModal';
 
@@ -76,6 +77,14 @@ export default function ProductsPage() {
         <h2 className="text-xl font-bold text-gray-800">상품 관리</h2>
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-500">전용 {exclusiveCount}종 · 범용 {generalCount}종</span>
+          {profile?.role === 'admin' && (
+            <Link
+              href="/products/logs"
+              className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
+            >
+              변경 이력
+            </Link>
+          )}
           {(profile?.role === 'admin' || profile?.role === 'shinwa') && (
             <button
               onClick={() => setShowAddModal(true)}
