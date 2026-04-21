@@ -48,3 +48,66 @@ export interface MenuItem {
   roles: UserRole[];
   storeReadOnly?: boolean; // 가맹점은 조회만
 }
+
+// B2B (아워홈 등 대기업 거래처) — 가맹점/예치금 시스템과 완전히 분리
+export interface B2bCustomer {
+  id: string;
+  name: string;
+  business_number: string | null;
+  contact_name: string | null;
+  contact_phone: string | null;
+  contact_email: string | null;
+  address: string | null;
+  memo: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type B2bOrderStatus = 'pending' | 'confirmed' | 'shipped' | 'cancelled';
+export type B2bUnit = 'box' | 'pack';
+
+export interface B2bOrder {
+  id: string;
+  order_number: string;
+  b2b_customer_id: string;
+  ordered_by: string;
+  status: B2bOrderStatus;
+  total_amount: number;          // 세포함 합계
+  total_amount_ex_tax: number;   // 세전 합계
+  memo: string | null;
+  order_date: string;            // YYYY-MM-DD
+  ship_date: string | null;
+  created_at: string;
+  updated_at: string;
+  b2b_customers?: { name: string };
+  b2b_order_items?: B2bOrderItem[];
+}
+
+export interface B2bOrderItem {
+  id: string;
+  order_id: string;
+  product_id: string | null;
+  product_name: string;
+  unit: B2bUnit;
+  quantity: number;
+  pack_per_box: number;
+  unit_price: number;
+  unit_price_with_tax: number;
+  is_tax_free: boolean;
+  subtotal: number;
+  subtotal_ex_tax: number;
+  created_at: string;
+}
+
+// 상품 (발주에서 사용하는 최소 필드 — B2B용)
+export interface B2bProduct {
+  id: string;
+  name: string;
+  product_type: 'exclusive' | 'general';
+  pack_per_box: number;
+  b2b_price: number;
+  b2b_price_with_tax: number;
+  is_b2b_eligible: boolean;
+  is_tax_free: boolean;
+}
