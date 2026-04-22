@@ -16,11 +16,16 @@ interface Product {
   price_with_tax: number;
   is_tax_free: boolean;
   storage: string | null;
+  pack_per_box: number;
+  is_loose_pack_sellable: boolean;
 }
 
 interface CartItem {
   product: Product;
   quantity: number;
+  unit: 'box' | 'pack';
+  unit_price: number;          // 단위별 세전 단가
+  unit_price_with_tax: number; // 단위별 세포함 단가
 }
 
 const storageLabel: Record<string, string> = {
@@ -46,6 +51,7 @@ export default function NewOrderPage() {
   const [deliveryInfo, setDeliveryInfo] = useState<DeliveryInfo | null>(null);
   const [jejuPalletBoxes, setJejuPalletBoxes] = useState<number>(0);
   const [inventory, setInventory] = useState<Record<string, number>>({});
+  const [loosePack, setLoosePack] = useState<Record<string, number>>({});
   const JEJU_PALLET_MIN = 55;
   const supabase = createClient();
 
@@ -81,16 +87,19 @@ export default function NewOrderPage() {
         .order('sort_order');
       setProducts((prods as Product[]) || []);
 
-      // 재고 정보 로드
+      // 재고 정보 로드 (박스 + 낱팩)
       const { data: invData } = await supabase
         .from('inventory')
-        .select('product_id, quantity');
+        .select('product_id, quantity, loose_pack_qty');
       if (invData) {
         const invMap: Record<string, number> = {};
-        invData.forEach((i: { product_id: string; quantity: number }) => {
+        const looseMap: Record<string, number> = {};
+        invData.forEach((i: { product_id: string; quantity: number; loose_pack_qty: number }) => {
           invMap[i.product_id] = i.quantity;
+          looseMap[i.product_id] = i.loose_pack_qty || 0;
         });
         setInventory(invMap);
+        setLoosePack(looseMap);
       }
 
       if (prof.role === 'admin') {
@@ -164,16 +173,25 @@ export default function NewOrderPage() {
     return matchType && matchSearch;
   });
 
-  const updateCart = (product: Product, qty: number) => {
+  const updateCart = (product: Product, unit: 'box' | 'pack', qty: number) => {
     setCart((prev) => {
-      const existing = prev.find((c) => c.product.id === product.id);
-      if (qty <= 0) return prev.filter((c) => c.product.id !== product.id);
-      if (existing) return prev.map((c) => c.product.id === product.id ? { ...c, quantity: qty } : c);
-      return [...prev, { product, quantity: qty }];
+      const existing = prev.find((c) => c.product.id === product.id && c.unit === unit);
+      if (qty <= 0) return prev.filter((c) => !(c.product.id === product.id && c.unit === unit));
+      const unit_price = unit === 'box' ? product.price : Math.round(product.price / (product.pack_per_box || 1));
+      const unit_price_with_tax = unit === 'box'
+        ? product.price_with_tax
+        : Math.round(product.price_with_tax / (product.pack_per_box || 1));
+      if (existing) {
+        return prev.map((c) =>
+          c.product.id === product.id && c.unit === unit ? { ...c, quantity: qty } : c
+        );
+      }
+      return [...prev, { product, unit, quantity: qty, unit_price, unit_price_with_tax }];
     });
   };
 
-  const getQty = (productId: string) => cart.find((c) => c.product.id === productId)?.quantity || 0;
+  const getQty = (productId: string, unit: 'box' | 'pack' = 'box') =>
+    cart.find((c) => c.product.id === productId && c.unit === unit)?.quantity || 0;
   const getStock = (productId: string): number | null => {
     if (productId in inventory) return inventory[productId];
     // 전용상품은 재고 레코드가 없으면 0 (품절)
@@ -185,8 +203,10 @@ export default function NewOrderPage() {
     const stock = getStock(productId);
     return stock !== null && stock <= 0;
   };
+  const getLoosePack = (productId: string) => loosePack[productId] || 0;
+  const getPackPrice = (product: Product) => Math.round(product.price_with_tax / (product.pack_per_box || 1));
 
-  const totalAmount = cart.reduce((sum, item) => sum + item.product.price_with_tax * item.quantity, 0);
+  const totalAmount = cart.reduce((sum, item) => sum + item.unit_price_with_tax * item.quantity, 0);
 
   const MIN_ORDER_AMOUNT = 150000;
 
@@ -215,12 +235,14 @@ export default function NewOrderPage() {
         memo,
         items: cart.map((item) => ({
           product_id: item.product.id,
-          product_name: item.product.name,
+          product_name: item.unit === 'pack' ? `${item.product.name} (낱팩)` : item.product.name,
           product_type: item.product.product_type,
           quantity: item.quantity,
-          unit_price: item.product.price,
-          unit_price_with_tax: item.product.price_with_tax,
+          unit_price: item.unit_price,
+          unit_price_with_tax: item.unit_price_with_tax,
           is_tax_free: item.product.is_tax_free,
+          unit: item.unit,
+          pack_per_box: item.product.pack_per_box || 1,
         })),
       }),
     });
@@ -237,16 +259,19 @@ export default function NewOrderPage() {
       if (store && !store.is_direct) {
         setStore({ ...store, deposit_balance: store.deposit_balance - orderedAmount });
       }
-      // 재고 갱신
+      // 재고 갱신 (박스 + 낱팩)
       const { data: invData } = await supabase
         .from('inventory')
-        .select('product_id, quantity');
+        .select('product_id, quantity, loose_pack_qty');
       if (invData) {
         const invMap: Record<string, number> = {};
-        invData.forEach((i: { product_id: string; quantity: number }) => {
+        const looseMap: Record<string, number> = {};
+        invData.forEach((i: { product_id: string; quantity: number; loose_pack_qty: number }) => {
           invMap[i.product_id] = i.quantity;
+          looseMap[i.product_id] = i.loose_pack_qty || 0;
         });
         setInventory(invMap);
+        setLoosePack(looseMap);
       }
       setResult({ success: true, message: data.order_number, amount: orderedAmount, deliveryInfo: deliveryInfo || undefined });
     } else {
@@ -445,59 +470,100 @@ export default function NewOrderPage() {
       {/* 상품 목록 */}
       <div className={`bg-white rounded-xl shadow-sm border border-gray-100 divide-y divide-gray-100 ${!selectedStoreId ? 'opacity-50 pointer-events-none' : ''}`}>
         {filteredProducts.map((product) => {
-          const qty = getQty(product.id);
+          const qty = getQty(product.id, 'box');
+          const packQty = getQty(product.id, 'pack');
           const stock = getStock(product.id);
           const outOfStock = isOutOfStock(product.id);
           const maxQty = stock !== null ? stock : Infinity;
+          const loose = getLoosePack(product.id);
+          const showLooseRow = product.is_loose_pack_sellable && loose > 0;
+          const packPrice = getPackPrice(product);
           return (
-            <div key={product.id} className={`p-5 sm:p-6 flex items-center gap-5 ${outOfStock ? 'opacity-50' : ''}`}>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className={`px-2.5 py-1 rounded text-sm font-semibold ${
-                    product.product_type === 'exclusive'
-                      ? 'bg-orange-100 text-orange-700'
-                      : 'bg-blue-100 text-blue-700'
-                  }`}>
-                    {product.product_type === 'exclusive' ? '전용' : '범용'}
-                  </span>
-                  <span className="text-base text-gray-400">
-                    {storageLabel[product.storage || ''] || ''} · {product.spec}
-                  </span>
-                  {stock !== null && profile?.role !== 'store' && (
-                    <span className={`text-sm font-medium ${outOfStock ? 'text-red-500' : stock <= 5 ? 'text-orange-500' : 'text-gray-400'}`}>
-                      재고 {stock}
+            <div key={product.id} className={`p-5 sm:p-6 ${outOfStock && !showLooseRow ? 'opacity-50' : ''}`}>
+              <div className="flex items-center gap-5">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`px-2.5 py-1 rounded text-sm font-semibold ${
+                      product.product_type === 'exclusive'
+                        ? 'bg-orange-100 text-orange-700'
+                        : 'bg-blue-100 text-blue-700'
+                    }`}>
+                      {product.product_type === 'exclusive' ? '전용' : '범용'}
                     </span>
+                    <span className="text-base text-gray-400">
+                      {storageLabel[product.storage || ''] || ''} · {product.spec}
+                    </span>
+                    {stock !== null && profile?.role !== 'store' && (
+                      <span className={`text-sm font-medium ${outOfStock ? 'text-red-500' : stock <= 5 ? 'text-orange-500' : 'text-gray-400'}`}>
+                        재고 {stock}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="font-bold text-gray-800 text-lg">{product.name}</h3>
+                  <p className="text-lg text-gray-600 mt-1">
+                    ₩{product.price_with_tax.toLocaleString()} / {product.unit}
+                    {product.is_tax_free && <span className="ml-1 text-base text-green-600">(면세)</span>}
+                  </p>
+                  {outOfStock && <p className="text-red-500 font-bold text-sm mt-1">품절</p>}
+                  {!outOfStock && stock !== null && qty >= stock && qty > 0 && profile?.role !== 'store' && (
+                    <p className="text-orange-500 font-medium text-sm mt-1">최대 주문 가능 수량: {stock}개</p>
                   )}
                 </div>
-                <h3 className="font-bold text-gray-800 text-lg">{product.name}</h3>
-                <p className="text-lg text-gray-600 mt-1">
-                  ₩{product.price_with_tax.toLocaleString()} / {product.unit}
-                  {product.is_tax_free && <span className="ml-1 text-base text-green-600">(면세)</span>}
-                </p>
-                {outOfStock && <p className="text-red-500 font-bold text-sm mt-1">품절</p>}
-                {!outOfStock && stock !== null && qty >= stock && qty > 0 && profile?.role !== 'store' && (
-                  <p className="text-orange-500 font-medium text-sm mt-1">최대 주문 가능 수량: {stock}개</p>
-                )}
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => updateCart(product, 'box', qty - 1)}
+                    disabled={qty === 0 || outOfStock}
+                    className="w-12 h-12 rounded-lg border border-gray-300 flex items-center justify-center text-xl text-gray-600 hover:bg-gray-50 disabled:opacity-30"
+                  >
+                    −
+                  </button>
+                  <span className={`w-12 text-center text-xl font-bold ${qty > 0 ? 'text-[#1B4332]' : 'text-gray-300'}`}>
+                    {qty}
+                  </span>
+                  <button
+                    onClick={() => updateCart(product, 'box', qty + 1)}
+                    disabled={outOfStock || qty >= maxQty}
+                    className="w-12 h-12 rounded-lg border border-[#1B4332] bg-[#1B4332] text-white text-xl flex items-center justify-center hover:bg-[#2D6A4F] disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    +
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => updateCart(product, qty - 1)}
-                  disabled={qty === 0 || outOfStock}
-                  className="w-12 h-12 rounded-lg border border-gray-300 flex items-center justify-center text-xl text-gray-600 hover:bg-gray-50 disabled:opacity-30"
-                >
-                  −
-                </button>
-                <span className={`w-12 text-center text-xl font-bold ${qty > 0 ? 'text-[#1B4332]' : 'text-gray-300'}`}>
-                  {qty}
-                </span>
-                <button
-                  onClick={() => updateCart(product, qty + 1)}
-                  disabled={outOfStock || qty >= maxQty}
-                  className="w-12 h-12 rounded-lg border border-[#1B4332] bg-[#1B4332] text-white text-xl flex items-center justify-center hover:bg-[#2D6A4F] disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  +
-                </button>
-              </div>
+
+              {/* 낱팩 옵션 행 — is_loose_pack_sellable ON AND loose_pack_qty > 0 */}
+              {showLooseRow && (
+                <div className="mt-3 pt-3 border-t border-dashed border-amber-200 flex items-center gap-5 bg-amber-50/50 -mx-2 px-4 py-3 rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-xs font-semibold">낱팩</span>
+                      <span className="text-sm text-amber-700 font-medium">{loose}팩 남음</span>
+                    </div>
+                    <p className="text-base text-gray-700 mt-1">
+                      ₩{packPrice.toLocaleString()} / 팩
+                      <span className="text-xs text-gray-400 ml-1">({product.pack_per_box}팩 = 1박스)</span>
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => updateCart(product, 'pack', packQty - 1)}
+                      disabled={packQty === 0}
+                      className="w-10 h-10 rounded-lg border border-gray-300 flex items-center justify-center text-lg text-gray-600 hover:bg-gray-50 disabled:opacity-30"
+                    >
+                      −
+                    </button>
+                    <span className={`w-10 text-center text-lg font-bold ${packQty > 0 ? 'text-amber-700' : 'text-gray-300'}`}>
+                      {packQty}
+                    </span>
+                    <button
+                      onClick={() => updateCart(product, 'pack', packQty + 1)}
+                      disabled={packQty >= loose}
+                      className="w-10 h-10 rounded-lg border border-amber-600 bg-amber-600 text-white text-lg flex items-center justify-center hover:bg-amber-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -612,22 +678,29 @@ export default function NewOrderPage() {
 
                   <div className="divide-y divide-gray-100">
                     {cart.map((item) => (
-                      <div key={item.product.id} className="py-3 flex items-center gap-3">
+                      <div key={`${item.product.id}|${item.unit}`} className="py-3 flex items-center gap-3">
                         <div className="flex-1 min-w-0">
-                          <span className="text-sm font-medium text-gray-800 block truncate">{item.product.name}</span>
-                          <span className="text-xs text-gray-400">₩{item.product.price_with_tax.toLocaleString()} / {item.product.unit}</span>
+                          <span className="text-sm font-medium text-gray-800 block truncate">
+                            {item.product.name}
+                            {item.unit === 'pack' && (
+                              <span className="ml-1 text-xs text-amber-700 font-semibold">· 낱팩</span>
+                            )}
+                          </span>
+                          <span className="text-xs text-gray-400">
+                            ₩{item.unit_price_with_tax.toLocaleString()} / {item.unit === 'pack' ? '팩' : item.product.unit}
+                          </span>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
-                          <button onClick={() => updateCart(item.product, item.quantity - 1)}
+                          <button onClick={() => updateCart(item.product, item.unit, item.quantity - 1)}
                             className="w-8 h-8 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50">−</button>
                           <span className="w-8 text-center text-sm font-bold text-[#1B4332]">{item.quantity}</span>
-                          <button onClick={() => updateCart(item.product, item.quantity + 1)}
+                          <button onClick={() => updateCart(item.product, item.unit, item.quantity + 1)}
                             className="w-8 h-8 rounded border border-[#1B4332] bg-[#1B4332] text-white flex items-center justify-center hover:bg-[#2D6A4F]">+</button>
-                          <button onClick={() => updateCart(item.product, 0)}
+                          <button onClick={() => updateCart(item.product, item.unit, 0)}
                             className="w-8 h-8 rounded border border-red-300 text-red-500 flex items-center justify-center hover:bg-red-50 ml-1">✕</button>
                         </div>
                         <span className="font-medium text-gray-800 text-sm w-24 text-right shrink-0">
-                          ₩{(item.product.price_with_tax * item.quantity).toLocaleString()}
+                          ₩{(item.unit_price_with_tax * item.quantity).toLocaleString()}
                         </span>
                       </div>
                     ))}

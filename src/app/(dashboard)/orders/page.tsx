@@ -25,6 +25,8 @@ interface OrderItem {
   quantity: number;
   unit_price_with_tax: number;
   subtotal: number;
+  unit?: 'box' | 'pack';
+  pack_per_box?: number;
 }
 
 interface OrderLog {
@@ -162,6 +164,8 @@ export default function OrdersPage() {
           unit_price: item.unit_price_with_tax,
           unit_price_with_tax: item.unit_price_with_tax,
           is_tax_free: false,
+          unit: item.unit || 'box',
+          pack_per_box: item.pack_per_box || 1,
         })),
       }),
     });

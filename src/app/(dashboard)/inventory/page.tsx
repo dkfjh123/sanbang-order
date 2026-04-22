@@ -8,6 +8,7 @@ interface InventoryItem {
   id: string;
   product_id: string;
   quantity: number;
+  loose_pack_qty: number;
   products: {
     name: string;
     spec: string | null;
@@ -16,6 +17,8 @@ interface InventoryItem {
     product_type: string;
     cost_price_with_tax: number;
     price_with_tax: number;
+    pack_per_box: number;
+    is_loose_pack_sellable: boolean;
   };
 }
 
@@ -48,6 +51,8 @@ export default function InventoryPage() {
   const [txFilter, setTxFilter] = useState('');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [userRole, setUserRole] = useState<string>('');
+  const [pendingToggle, setPendingToggle] = useState<{ productId: string; next: boolean } | null>(null);
+  const [showTogglePasswordModal, setShowTogglePasswordModal] = useState(false);
   const txSectionRef = useRef<HTMLDivElement>(null);
   const supabase = createClient();
 
@@ -65,7 +70,7 @@ export default function InventoryPage() {
     // 기존 inventory 레코드 로드
     const { data: inv } = await supabase
       .from('inventory')
-      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax)')
+      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, pack_per_box, is_loose_pack_sellable)')
       .order('product_id');
     const existingItems = (inv as InventoryItem[]) || [];
     const existingProductIds = new Set(existingItems.map((i) => i.product_id));
@@ -73,16 +78,17 @@ export default function InventoryPage() {
     // 전용상품 중 inventory 레코드가 없는 상품도 표시 (재고 0)
     const { data: exclusiveProducts } = await supabase
       .from('products')
-      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax')
+      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, pack_per_box, is_loose_pack_sellable')
       .eq('product_type', 'exclusive')
       .eq('is_active', true);
 
     const missingItems: InventoryItem[] = (exclusiveProducts || [])
       .filter((p: { id: string }) => !existingProductIds.has(p.id))
-      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number }) => ({
+      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean }) => ({
         id: `virtual-${p.id}`,
         product_id: p.id,
         quantity: 0,
+        loose_pack_qty: 0,
         products: {
           name: p.name,
           spec: p.spec,
@@ -91,6 +97,8 @@ export default function InventoryPage() {
           product_type: p.product_type,
           cost_price_with_tax: p.cost_price_with_tax,
           price_with_tax: p.price_with_tax,
+          pack_per_box: p.pack_per_box,
+          is_loose_pack_sellable: p.is_loose_pack_sellable,
         },
       }));
 
@@ -189,6 +197,37 @@ export default function InventoryPage() {
     return item?.products?.name || productId;
   };
 
+  const requestToggleLoosePack = (productId: string, next: boolean) => {
+    const item = items.find((i) => i.product_id === productId);
+    if (!item) return;
+    setPendingToggle({ productId, next });
+    // 전용상품은 비밀번호 재확인, 범용은 바로 반영
+    if (item.products.product_type === 'exclusive') {
+      setShowTogglePasswordModal(true);
+    } else {
+      applyLoosePackToggle(productId, next);
+    }
+  };
+
+  const applyLoosePackToggle = async (productId: string, next: boolean) => {
+    const { error: updErr } = await supabase
+      .from('products')
+      .update({ is_loose_pack_sellable: next })
+      .eq('id', productId);
+    setShowTogglePasswordModal(false);
+    setPendingToggle(null);
+    if (updErr) {
+      alert(`낱팩 판매 설정 변경 실패: ${updErr.message}`);
+      return;
+    }
+    // 낙관적 갱신
+    setItems((prev) => prev.map((i) =>
+      i.product_id === productId
+        ? { ...i, products: { ...i.products, is_loose_pack_sellable: next } }
+        : i
+    ));
+  };
+
   const filteredTx = txFilter
     ? transactions.filter((tx) => tx.product_id === txFilter)
     : transactions;
@@ -219,6 +258,9 @@ export default function InventoryPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {items.map((item) => {
           const isLow = item.quantity <= 3;
+          const ppb = item.products?.pack_per_box || 1;
+          const hasLoose = (item.loose_pack_qty || 0) > 0;
+          const canTogglePack = userRole === 'admin' && ppb > 1;
           return (
             <div
               key={item.id}
@@ -251,10 +293,54 @@ export default function InventoryPage() {
                   이력 보기
                 </button>
               </div>
+
+              {/* 낱팩 / 가맹점 판매 토글 (박스 입수 > 1 인 상품만) */}
+              {ppb > 1 && (
+                <div className="mt-3 pt-3 border-t border-gray-100 space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-500">낱팩</span>
+                    <span className={`font-bold ${hasLoose ? 'text-amber-600' : 'text-gray-400'}`}>
+                      {item.loose_pack_qty || 0}팩
+                      <span className="text-xs text-gray-400 font-normal"> / {ppb}팩당 1박스</span>
+                    </span>
+                  </div>
+                  {canTogglePack && (
+                    <label className="flex items-center justify-between text-xs cursor-pointer select-none">
+                      <span className="text-gray-500">가맹점 낱팩 판매</span>
+                      <button
+                        type="button"
+                        onClick={() => requestToggleLoosePack(item.product_id, !item.products.is_loose_pack_sellable)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
+                          item.products.is_loose_pack_sellable ? 'bg-[#1B4332]' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition ${
+                            item.products.is_loose_pack_sellable ? 'translate-x-5' : 'translate-x-1'
+                          }`}
+                        />
+                      </button>
+                    </label>
+                  )}
+                  {!canTogglePack && item.products.is_loose_pack_sellable && (
+                    <p className="text-xs text-emerald-600">가맹점 낱팩 판매 ON</p>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
+
+      {/* 낱팩 판매 토글 — 전용상품 비밀번호 확인 */}
+      {showTogglePasswordModal && pendingToggle && (
+        <PasswordConfirmModal
+          title="비밀번호 확인"
+          message="전용상품의 낱팩 판매 설정 변경은 비밀번호 확인이 필요합니다."
+          onConfirm={() => applyLoosePackToggle(pendingToggle.productId, pendingToggle.next)}
+          onCancel={() => { setShowTogglePasswordModal(false); setPendingToggle(null); }}
+        />
+      )}
 
       {/* 입출고 이력 */}
       <div ref={txSectionRef} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">

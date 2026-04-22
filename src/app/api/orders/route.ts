@@ -67,27 +67,52 @@ export async function POST(request: Request) {
     }, { status: 400 });
   }
 
-  // 재고 확인
+  // 재고 확인 (박스/낱팩 단위 별도)
   const productIds = items.map((item: { product_id: string }) => item.product_id);
   const { data: inventoryData } = await adminSupabase
     .from('inventory')
-    .select('product_id, quantity, products(name)')
+    .select('product_id, quantity, loose_pack_qty, products(name, pack_per_box)')
     .in('product_id', productIds);
 
-  for (const item of items as { product_id: string; product_name: string; product_type: string; quantity: number }[]) {
-    const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id);
-    if (inv) {
-      // 재고 레코드 있음 → 수량 체크
-      if (inv.quantity < item.quantity) {
+  type OrderItemInput = {
+    product_id: string;
+    product_name: string;
+    product_type: string;
+    quantity: number;
+    unit?: 'box' | 'pack';
+    pack_per_box?: number;
+  };
+
+  for (const item of items as OrderItemInput[]) {
+    const unit = item.unit || 'box';
+    const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id) as
+      | { quantity: number; loose_pack_qty: number; products: { pack_per_box: number } | null }
+      | undefined;
+
+    if (!inv) {
+      if (item.product_type === 'exclusive') {
         return NextResponse.json({
-          error: `${item.product_name} 재고가 부족합니다. (현재: ${inv.quantity}개, 주문: ${item.quantity}개)`,
+          error: `${item.product_name} 재고가 등록되지 않았습니다. 관리자에게 문의하세요.`,
         }, { status: 400 });
       }
-    } else if (item.product_type === 'exclusive') {
-      // 전용상품인데 재고 레코드 없음 → 품절
-      return NextResponse.json({
-        error: `${item.product_name} 재고가 등록되지 않았습니다. 관리자에게 문의하세요.`,
-      }, { status: 400 });
+      continue; // 범용상품은 재고 레코드 없어도 통과 (기존 동작)
+    }
+
+    if (unit === 'box') {
+      if (inv.quantity < item.quantity) {
+        return NextResponse.json({
+          error: `${item.product_name} 재고가 부족합니다. (현재: ${inv.quantity}박스, 주문: ${item.quantity}박스)`,
+        }, { status: 400 });
+      }
+    } else {
+      // 팩 주문: 낱팩 + 박스를 깨서 충당 가능한지 확인
+      const ppb = item.pack_per_box || inv.products?.pack_per_box || 1;
+      const availablePacks = inv.loose_pack_qty + inv.quantity * ppb;
+      if (availablePacks < item.quantity) {
+        return NextResponse.json({
+          error: `${item.product_name} 낱팩 재고가 부족합니다. (가용: ${availablePacks}팩, 주문: ${item.quantity}팩)`,
+        }, { status: 400 });
+      }
     }
   }
 
@@ -122,8 +147,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: orderError.message }, { status: 400 });
   }
 
-  // 주문 상세 생성
-  const orderItems = items.map((item: {
+  // 주문 상세 생성 (unit / pack_per_box 스냅샷 포함)
+  const orderItems = (items as Array<{
     product_id: string;
     product_name: string;
     product_type: string;
@@ -131,17 +156,27 @@ export async function POST(request: Request) {
     unit_price: number;
     unit_price_with_tax: number;
     is_tax_free: boolean;
-  }) => ({
-    order_id: order.id,
-    product_id: item.product_id,
-    product_name: item.product_name,
-    product_type: item.product_type,
-    quantity: item.quantity,
-    unit_price: item.unit_price,
-    unit_price_with_tax: item.unit_price_with_tax,
-    is_tax_free: item.is_tax_free,
-    subtotal: item.unit_price_with_tax * item.quantity,
-  }));
+    unit?: 'box' | 'pack';
+    pack_per_box?: number;
+  }>).map((item) => {
+    const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id) as
+      | { products: { pack_per_box: number } | null }
+      | undefined;
+    const ppb = item.pack_per_box || inv?.products?.pack_per_box || 1;
+    return {
+      order_id: order.id,
+      product_id: item.product_id,
+      product_name: item.product_name,
+      product_type: item.product_type,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      unit_price_with_tax: item.unit_price_with_tax,
+      is_tax_free: item.is_tax_free,
+      subtotal: item.unit_price_with_tax * item.quantity,
+      unit: item.unit || 'box',
+      pack_per_box: ppb,
+    };
+  });
 
   const { error: itemsError } = await adminSupabase
     .from('order_items')
@@ -151,11 +186,47 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: itemsError.message }, { status: 400 });
   }
 
-  // 재고 차감 (inventory에 등록된 상품만)
+  // 재고 차감
+  //  - 박스 주문(unit='box'): 기존 직접 경로 유지 (inventory.quantity -= qty + inventory_transactions insert)
+  //  - 팩 주문 (unit='pack'): apply_b2b_inventory_delta RPC 재사용 (낱팩 먼저, 부족분은 박스 깨서 충당)
+  //  - 팩 RPC 실패 시 앞서 차감한 박스/팩을 모두 복구
+  const appliedBox: Array<{ product_id: string; quantity: number }> = [];
+  const appliedPack: Array<{ product_id: string; quantity: number }> = [];
+
+  const rollbackAll = async () => {
+    for (const a of appliedBox) {
+      const { data: cur } = await adminSupabase
+        .from('inventory').select('quantity').eq('product_id', a.product_id).single();
+      if (cur) {
+        await adminSupabase.from('inventory')
+          .update({ quantity: cur.quantity + a.quantity })
+          .eq('product_id', a.product_id);
+        await adminSupabase.from('inventory_transactions').insert({
+          product_id: a.product_id, type: 'inbound', quantity: a.quantity,
+          description: `발주 실패 롤백 (${orderNumber})`, created_by: user.id,
+        });
+      }
+    }
+    for (const a of appliedPack) {
+      await adminSupabase.rpc('apply_b2b_inventory_delta', {
+        p_product_id: a.product_id, p_unit: 'pack', p_delta: -a.quantity,
+        p_description: `발주 실패 롤백 (${orderNumber})`, p_actor: user.id,
+      });
+    }
+  };
+
   if (inventoryData && inventoryData.length > 0) {
-    for (const item of items as { product_id: string; product_name: string; quantity: number }[]) {
+    for (const item of items as Array<{
+      product_id: string;
+      product_name: string;
+      quantity: number;
+      unit?: 'box' | 'pack';
+    }>) {
+      const unit: 'box' | 'pack' = item.unit || 'box';
       const inv = inventoryData.find((i: { product_id: string }) => i.product_id === item.product_id);
-      if (inv) {
+      if (!inv) continue;
+
+      if (unit === 'box') {
         const newQty = inv.quantity - item.quantity;
         await adminSupabase
           .from('inventory')
@@ -171,6 +242,21 @@ export async function POST(request: Request) {
             description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name}`,
             created_by: user.id,
           });
+        appliedBox.push({ product_id: item.product_id, quantity: item.quantity });
+      } else {
+        const { error: rpcError } = await adminSupabase.rpc('apply_b2b_inventory_delta', {
+          p_product_id: item.product_id,
+          p_unit: 'pack',
+          p_delta: item.quantity,
+          p_description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name} · 낱팩`,
+          p_actor: user.id,
+        });
+        if (rpcError) {
+          await rollbackAll();
+          await adminSupabase.from('orders').delete().eq('id', order.id);
+          return NextResponse.json({ error: `낱팩 차감 실패: ${rpcError.message}` }, { status: 400 });
+        }
+        appliedPack.push({ product_id: item.product_id, quantity: item.quantity });
       }
     }
   }

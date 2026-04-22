@@ -90,16 +90,16 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: '예치금이 부족합니다.' }, { status: 400 });
   }
 
-  // 기존 항목 조회 (재고 조정용)
+  // 기존 항목 조회 (재고 조정용) — unit/pack_per_box 포함
   const { data: oldItems } = await adminSupabase
     .from('order_items')
-    .select('product_id, quantity')
+    .select('product_id, quantity, unit, pack_per_box')
     .eq('order_id', id);
 
-  // 기존 항목 삭제 후 새로 삽입
+  // 기존 항목 삭제 후 새로 삽입 (unit/pack_per_box 스냅샷 유지)
   await adminSupabase.from('order_items').delete().eq('order_id', id);
 
-  const orderItems = items.map((item: {
+  type EditItemInput = {
     product_id: string;
     product_name: string;
     product_type: string;
@@ -107,7 +107,11 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     unit_price: number;
     unit_price_with_tax: number;
     is_tax_free: boolean;
-  }) => ({
+    unit?: 'box' | 'pack';
+    pack_per_box?: number;
+  };
+
+  const orderItems = (items as EditItemInput[]).map((item) => ({
     order_id: id,
     product_id: item.product_id,
     product_name: item.product_name,
@@ -117,6 +121,8 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     unit_price_with_tax: item.unit_price_with_tax,
     is_tax_free: item.is_tax_free,
     subtotal: item.unit_price_with_tax * item.quantity,
+    unit: item.unit || 'box',
+    pack_per_box: item.pack_per_box || 1,
   }));
 
   await adminSupabase.from('order_items').insert(orderItems);
@@ -124,52 +130,70 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   // 주문 총액 업데이트
   await adminSupabase.from('orders').update({ total_amount: newTotal }).eq('id', id);
 
-  // 재고 조정: 기존 수량과 새 수량의 차이만큼 반영
+  // 재고 조정: (product_id, unit) 키로 묶어서 delta 계산
+  //  - 박스 delta: 기존 직접 경로 유지
+  //  - 팩 delta: apply_b2b_inventory_delta RPC 재사용
   if (oldItems) {
     const oldQtyMap: Record<string, number> = {};
-    for (const oi of oldItems) {
-      oldQtyMap[oi.product_id] = (oldQtyMap[oi.product_id] || 0) + oi.quantity;
+    for (const oi of oldItems as Array<{ product_id: string; quantity: number; unit: 'box' | 'pack' | null }>) {
+      const key = `${oi.product_id}|${oi.unit || 'box'}`;
+      oldQtyMap[key] = (oldQtyMap[key] || 0) + oi.quantity;
     }
     const newQtyMap: Record<string, number> = {};
-    for (const ni of items as { product_id: string; quantity: number }[]) {
-      newQtyMap[ni.product_id] = (newQtyMap[ni.product_id] || 0) + ni.quantity;
+    for (const ni of items as EditItemInput[]) {
+      const key = `${ni.product_id}|${ni.unit || 'box'}`;
+      newQtyMap[key] = (newQtyMap[key] || 0) + ni.quantity;
     }
 
-    // 모든 관련 product_id 수집
-    const allProductIds = [...new Set([...Object.keys(oldQtyMap), ...Object.keys(newQtyMap)])];
+    const allKeys = [...new Set([...Object.keys(oldQtyMap), ...Object.keys(newQtyMap)])];
 
-    for (const productId of allProductIds) {
-      const oldQty = oldQtyMap[productId] || 0;
-      const newQty = newQtyMap[productId] || 0;
+    for (const key of allKeys) {
+      const [productId, unit] = key.split('|') as [string, 'box' | 'pack'];
+      const oldQty = oldQtyMap[key] || 0;
+      const newQty = newQtyMap[key] || 0;
       const qtyDiff = newQty - oldQty; // 양수: 추가 차감 필요, 음수: 복구 필요
 
       if (qtyDiff === 0) continue;
 
-      const { data: inv } = await adminSupabase
-        .from('inventory')
-        .select('quantity')
-        .eq('product_id', productId)
-        .single();
-
-      if (inv) {
-        const updatedQty = inv.quantity - qtyDiff;
-        if (updatedQty < 0) {
-          return NextResponse.json({ error: '재고가 부족하여 수량을 변경할 수 없습니다.' }, { status: 400 });
-        }
-        await adminSupabase
+      if (unit === 'box') {
+        const { data: inv } = await adminSupabase
           .from('inventory')
-          .update({ quantity: updatedQty })
-          .eq('product_id', productId);
+          .select('quantity')
+          .eq('product_id', productId)
+          .single();
 
-        await adminSupabase
-          .from('inventory_transactions')
-          .insert({
-            product_id: productId,
-            type: qtyDiff > 0 ? 'outbound' : 'inbound',
-            quantity: -qtyDiff,
-            description: `발주 수정 (${order.order_number}) - ${qtyDiff > 0 ? '추가 출고' : '수량 감소 복구'}`,
-            created_by: user.id,
-          });
+        if (inv) {
+          const updatedQty = inv.quantity - qtyDiff;
+          if (updatedQty < 0) {
+            return NextResponse.json({ error: '재고가 부족하여 수량을 변경할 수 없습니다.' }, { status: 400 });
+          }
+          await adminSupabase
+            .from('inventory')
+            .update({ quantity: updatedQty })
+            .eq('product_id', productId);
+
+          await adminSupabase
+            .from('inventory_transactions')
+            .insert({
+              product_id: productId,
+              type: qtyDiff > 0 ? 'outbound' : 'inbound',
+              quantity: -qtyDiff,
+              description: `발주 수정 (${order.order_number}) - ${qtyDiff > 0 ? '추가 출고' : '수량 감소 복구'}`,
+              created_by: user.id,
+            });
+        }
+      } else {
+        // 팩 델타: RPC 로 처리. qtyDiff>0 → 양수 델타(추가 차감), qtyDiff<0 → 음수 델타(복구)
+        const { error: rpcError } = await adminSupabase.rpc('apply_b2b_inventory_delta', {
+          p_product_id: productId,
+          p_unit: 'pack',
+          p_delta: qtyDiff,
+          p_description: `발주 수정 (${order.order_number}) · 낱팩 ${qtyDiff > 0 ? '추가' : '감소'}`,
+          p_actor: user.id,
+        });
+        if (rpcError) {
+          return NextResponse.json({ error: `낱팩 재고 조정 실패: ${rpcError.message}` }, { status: 400 });
+        }
       }
     }
   }
@@ -247,35 +271,47 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   // 주문 취소 처리
   await adminSupabase.from('orders').update({ status: 'cancelled' }).eq('id', id);
 
-  // 재고 복구
+  // 재고 복구 — 박스는 기존 직접 경로, 팩은 RPC 재사용
   const { data: cancelItems } = await adminSupabase
     .from('order_items')
-    .select('product_id, product_name, quantity')
+    .select('product_id, product_name, quantity, unit')
     .eq('order_id', id);
 
   if (cancelItems) {
-    for (const item of cancelItems) {
-      const { data: inv } = await adminSupabase
-        .from('inventory')
-        .select('quantity')
-        .eq('product_id', item.product_id)
-        .single();
-
-      if (inv) {
-        await adminSupabase
+    for (const item of cancelItems as Array<{ product_id: string; product_name: string; quantity: number; unit: 'box' | 'pack' | null }>) {
+      const unit = item.unit || 'box';
+      if (unit === 'box') {
+        const { data: inv } = await adminSupabase
           .from('inventory')
-          .update({ quantity: inv.quantity + item.quantity })
-          .eq('product_id', item.product_id);
+          .select('quantity')
+          .eq('product_id', item.product_id)
+          .single();
 
-        await adminSupabase
-          .from('inventory_transactions')
-          .insert({
-            product_id: item.product_id,
-            type: 'inbound',
-            quantity: item.quantity,
-            description: `발주 취소 복구 (${order.order_number})`,
-            created_by: user.id,
-          });
+        if (inv) {
+          await adminSupabase
+            .from('inventory')
+            .update({ quantity: inv.quantity + item.quantity })
+            .eq('product_id', item.product_id);
+
+          await adminSupabase
+            .from('inventory_transactions')
+            .insert({
+              product_id: item.product_id,
+              type: 'inbound',
+              quantity: item.quantity,
+              description: `발주 취소 복구 (${order.order_number})`,
+              created_by: user.id,
+            });
+        }
+      } else {
+        // 낱팩 주문: RPC 음수 델타로 복구 (낱팩 누적 → 박스 승격)
+        await adminSupabase.rpc('apply_b2b_inventory_delta', {
+          p_product_id: item.product_id,
+          p_unit: 'pack',
+          p_delta: -item.quantity,
+          p_description: `발주 취소 복구 (${order.order_number}) · 낱팩`,
+          p_actor: user.id,
+        });
       }
     }
   }
