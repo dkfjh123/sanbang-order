@@ -29,10 +29,6 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
   }
 
-  if (order.status !== 'pending') {
-    return NextResponse.json({ error: '대기 상태인 주문만 수정할 수 있습니다.' }, { status: 400 });
-  }
-
   // 권한 확인
   const { data: profile } = await adminSupabase
     .from('profiles')
@@ -42,6 +38,17 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
   const isAdmin = profile?.role === 'admin';
   const isStore = profile?.role === 'store';
+
+  // 상태별 수정 허용: pending은 모두, confirmed는 admin만, 그 외는 금지
+  if (order.status === 'pending') {
+    // 통과
+  } else if (order.status === 'confirmed') {
+    if (!isAdmin) {
+      return NextResponse.json({ error: '확정된 주문은 관리자만 수정할 수 있습니다.' }, { status: 400 });
+    }
+  } else {
+    return NextResponse.json({ error: '출고 또는 취소된 주문은 수정할 수 없습니다.' }, { status: 400 });
+  }
 
   // 신화푸드: 수정 불가
   if (profile?.role === 'shinwa') {
@@ -241,16 +248,25 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
   }
 
-  if (order.status !== 'pending') {
-    return NextResponse.json({ error: '대기 상태인 주문만 취소할 수 있습니다.' }, { status: 400 });
-  }
-
   // 권한 확인
   const { data: profile } = await adminSupabase
     .from('profiles')
     .select('role')
     .eq('id', user.id)
     .single();
+
+  const isAdmin = profile?.role === 'admin';
+
+  // 상태별 취소 허용: pending은 모두, confirmed는 admin만, 그 외는 금지
+  if (order.status === 'pending') {
+    // 통과
+  } else if (order.status === 'confirmed') {
+    if (!isAdmin) {
+      return NextResponse.json({ error: '확정된 주문은 관리자만 취소할 수 있습니다.' }, { status: 400 });
+    }
+  } else {
+    return NextResponse.json({ error: '출고 또는 이미 취소된 주문은 취소할 수 없습니다.' }, { status: 400 });
+  }
 
   // 신화푸드: 취소 불가
   if (profile?.role === 'shinwa') {
@@ -336,6 +352,66 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
       created_by: user.id,
     });
   }
+
+  return NextResponse.json({ success: true });
+}
+
+// PATCH: action='ship' — confirmed → shipped (재고는 발주 시점에 이미 차감, 여기선 상태만 변경)
+export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const serverSupabase = await createServerClient();
+  const { data: { user } } = await serverSupabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.json({ error: '인증이 필요합니다.' }, { status: 401 });
+  }
+
+  const adminSupabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
+  const { data: profile } = await adminSupabase
+    .from('profiles')
+    .select('role, name')
+    .eq('id', user.id)
+    .single();
+
+  // shinwa 또는 admin만 출고 처리 가능
+  if (profile?.role !== 'shinwa' && profile?.role !== 'admin') {
+    return NextResponse.json({ error: '출고 권한이 없습니다.' }, { status: 403 });
+  }
+
+  const body = await request.json();
+  const action = body.action as 'ship' | undefined;
+
+  if (action !== 'ship') {
+    return NextResponse.json({ error: 'action이 올바르지 않습니다.' }, { status: 400 });
+  }
+
+  const { data: order } = await adminSupabase
+    .from('orders')
+    .select('status, order_number')
+    .eq('id', id)
+    .single();
+
+  if (!order) {
+    return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
+  }
+  if (order.status !== 'confirmed') {
+    return NextResponse.json({ error: '확정된 주문만 출고 처리할 수 있습니다.' }, { status: 400 });
+  }
+
+  await adminSupabase.from('orders').update({ status: 'shipped' }).eq('id', id);
+
+  await adminSupabase.from('order_logs').insert({
+    order_id: id,
+    action: '출고 처리',
+    description: null,
+    changed_by: user.id,
+    changed_by_name: profile?.name,
+    changed_by_role: profile?.role,
+  });
 
   return NextResponse.json({ success: true });
 }

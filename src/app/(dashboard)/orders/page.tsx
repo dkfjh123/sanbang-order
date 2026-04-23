@@ -41,6 +41,7 @@ interface OrderLog {
 const statusLabel: Record<string, { text: string; color: string }> = {
   pending: { text: '대기', color: 'bg-yellow-100 text-yellow-700' },
   confirmed: { text: '확정', color: 'bg-green-100 text-green-700' },
+  shipped: { text: '출고완료', color: 'bg-blue-100 text-blue-700' },
   cancelled: { text: '취소', color: 'bg-red-100 text-red-700' },
 };
 
@@ -134,6 +135,27 @@ export default function OrdersPage() {
     if (res.ok) {
       setSelectedOrder(null);
       refreshOrders();
+    } else {
+      const { error } = await res.json().catch(() => ({ error: '취소 실패' }));
+      alert(error || '취소 실패');
+    }
+  };
+
+  const handleShipOrder = async (orderId: string) => {
+    if (!confirm('이 주문을 출고 처리하시겠습니까?\n출고 후에는 상태를 되돌릴 수 없습니다.')) return;
+    const res = await fetch(`/api/orders/${orderId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'ship' }),
+    });
+    if (res.ok) {
+      await refreshOrders();
+      if (selectedOrder?.id === orderId) {
+        loadOrderDetail({ ...selectedOrder, status: 'shipped' });
+      }
+    } else {
+      const { error } = await res.json().catch(() => ({ error: '출고 처리 실패' }));
+      alert(error || '출고 처리 실패');
     }
   };
 
@@ -252,6 +274,7 @@ export default function OrdersPage() {
           ['all', '전체'],
           ['pending', '대기'],
           ['confirmed', '확정'],
+          ['shipped', '출고완료'],
           ['cancelled', '취소'],
         ].map(([key, label]) => (
           <button
@@ -361,13 +384,15 @@ export default function OrdersPage() {
             </div>
 
             {/* 수정/취소 버튼 */}
-            {selectedOrder.status === 'pending' && !editMode && (() => {
+            {(selectedOrder.status === 'pending' || selectedOrder.status === 'confirmed') && !editMode && (() => {
               const isAdmin = profile?.role === 'admin';
               const isStore = profile?.role === 'store';
-              // 가맹점: 마감 전에만 수정/취소 가능
+              // 가맹점: pending + 마감 전에만 수정/취소 가능
               const region = selectedOrder.stores?.region as 'seoul' | 'jeju' | undefined;
               const isPastDeadline = region ? getDeliverySchedule(region).isPastDeadline : false;
-              const canEdit = isAdmin || (isStore && !isPastDeadline);
+              const canEdit =
+                isAdmin || // 관리자는 pending/confirmed 모두 수정 가능 (유선 대응)
+                (isStore && selectedOrder.status === 'pending' && !isPastDeadline);
               if (!canEdit) return null;
               return (
                 <div className="flex gap-2 mb-4">
@@ -486,13 +511,19 @@ export default function OrdersPage() {
                 {selectedOrder.status === 'confirmed' && (
                   <div className="mt-4 pt-4 border-t border-gray-200">
                     <p className="text-sm text-gray-500 mb-2">상태 변경</p>
-                    <button onClick={() => {
-                      if (!confirm('발주 확정을 취소하시겠습니까?\n상태가 대기로 되돌아갑니다.')) return;
-                      updateStatus(selectedOrder.id, 'pending');
-                    }}
-                      className="w-full py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600">
-                      확정 취소 (대기로 되돌리기)
-                    </button>
+                    <div className="flex gap-2">
+                      <button onClick={() => handleShipOrder(selectedOrder.id)}
+                        className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
+                        출고 처리
+                      </button>
+                      <button onClick={() => {
+                        if (!confirm('발주 확정을 취소하시겠습니까?\n상태가 대기로 되돌아갑니다.')) return;
+                        updateStatus(selectedOrder.id, 'pending');
+                      }}
+                        className="flex-1 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600">
+                        확정 취소
+                      </button>
+                    </div>
                   </div>
                 )}
               </>
