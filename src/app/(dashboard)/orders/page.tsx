@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { getDeliverySchedule } from '@/lib/delivery-schedule';
+import { isPastDeadlineForStore } from '@/lib/delivery-schedule';
 import type { Profile } from '@/types';
 
 interface Order {
@@ -13,8 +13,16 @@ interface Order {
   total_amount: number;
   memo: string | null;
   delivery_date: string | null;
+  ship_date: string | null;
   created_at: string;
-  stores: { short_name: string; name: string; region: string } | null;
+  stores: {
+    short_name: string;
+    name: string;
+    region: 'seoul' | 'jeju';
+    delivery_days: number[] | null;
+    allow_split_shipping: boolean;
+    deadline_override_until: string | null;
+  } | null;
 }
 
 interface OrderItem {
@@ -27,6 +35,15 @@ interface OrderItem {
   subtotal: number;
   unit?: 'box' | 'pack';
   pack_per_box?: number;
+  ship_date?: string | null;
+}
+
+const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
+function formatShipDate(dateStr: string | null | undefined): string {
+  if (!dateStr) return '미지정';
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return `${d.getMonth() + 1}/${d.getDate()}(${DAY_NAMES[d.getDay()]})`;
 }
 
 interface OrderLog {
@@ -74,7 +91,7 @@ export default function OrdersPage() {
 
       const { data } = await supabase
         .from('orders')
-        .select('*, stores(short_name, name, region)')
+        .select('*, stores(short_name, name, region, delivery_days, allow_split_shipping, deadline_override_until)')
         .order('created_at', { ascending: false });
 
       setOrders((data as Order[]) || []);
@@ -102,7 +119,7 @@ export default function OrdersPage() {
   const refreshOrders = async () => {
     const { data } = await supabase
       .from('orders')
-      .select('*, stores(short_name, name, region)')
+      .select('*, stores(short_name, name, region, delivery_days, allow_split_shipping, deadline_override_until)')
       .order('created_at', { ascending: false });
     setOrders((data as Order[]) || []);
   };
@@ -375,6 +392,16 @@ export default function OrdersPage() {
                   {statusLabel[selectedOrder.status]?.text}
                 </span>
               </div>
+              {selectedOrder.ship_date && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-500">
+                    {selectedOrder.stores?.allow_split_shipping ? '요청 배송일' : '출고 예정일'}
+                  </span>
+                  <span className={`font-bold ${selectedOrder.stores?.allow_split_shipping ? 'text-purple-700' : 'text-gray-800'}`}>
+                    {formatShipDate(selectedOrder.ship_date)}
+                  </span>
+                </div>
+              )}
               {selectedOrder.memo && (
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">메모</span>
@@ -387,11 +414,17 @@ export default function OrdersPage() {
             {(selectedOrder.status === 'pending' || selectedOrder.status === 'confirmed') && !editMode && (() => {
               const isAdmin = profile?.role === 'admin';
               const isStore = profile?.role === 'store';
-              // 가맹점: pending + 마감 전에만 수정/취소 가능
-              const region = selectedOrder.stores?.region as 'seoul' | 'jeju' | undefined;
-              const isPastDeadline = region ? getDeliverySchedule(region).isPastDeadline : false;
+              // 가맹점: pending + 마감 전에만 수정/취소 가능 (store 기반 마감 + override 반영)
+              const s = selectedOrder.stores;
+              const isPastDeadline = s
+                ? isPastDeadlineForStore({
+                    region: s.region,
+                    delivery_days: s.delivery_days,
+                    deadline_override_until: s.deadline_override_until,
+                  })
+                : false;
               const canEdit =
-                isAdmin || // 관리자는 pending/confirmed 모두 수정 가능 (유선 대응)
+                isAdmin ||
                 (isStore && selectedOrder.status === 'pending' && !isPastDeadline);
               if (!canEdit) return null;
               return (
@@ -567,15 +600,23 @@ export default function OrdersPage() {
 function OrderCard({ order, onClick }: { order: Order; onClick: () => void }) {
   const st = statusLabel[order.status] || statusLabel.pending;
   const storeName = order.stores?.short_name || order.stores?.name || '';
+  const dateChosen = order.stores?.allow_split_shipping;
   return (
     <div
       onClick={onClick}
       className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 cursor-pointer hover:border-[#2D6A4F] transition"
     >
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="font-semibold text-gray-800 text-sm">{order.order_number}</span>
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${st.color}`}>{st.text}</span>
+          {order.ship_date && (
+            <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+              dateChosen ? 'bg-purple-100 text-purple-700' : 'bg-emerald-50 text-emerald-700'
+            }`}>
+              {dateChosen ? '요청 배송일' : '출고'} {formatShipDate(order.ship_date)}
+            </span>
+          )}
         </div>
         <span className="font-bold text-gray-800">₩{order.total_amount.toLocaleString()}</span>
       </div>

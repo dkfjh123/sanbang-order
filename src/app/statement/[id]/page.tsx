@@ -10,6 +10,7 @@ interface OrderData {
   created_at: string;
   total_amount: number;
   memo: string | null;
+  ship_date: string | null;
   stores: {
     name: string;
     short_name: string;
@@ -17,6 +18,7 @@ interface OrderData {
     address: string;
     contact_name: string;
     contact_phone: string;
+    allow_split_shipping: boolean;
   };
   order_items: {
     product_name: string;
@@ -24,7 +26,16 @@ interface OrderData {
     quantity: number;
     unit_price_with_tax: number;
     subtotal: number;
+    ship_date: string | null;
   }[];
+}
+
+const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
+function formatShipDate(dateStr: string | null | undefined): string {
+  if (!dateStr) return '미지정';
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return `${d.getMonth() + 1}/${d.getDate()}(${DAY_NAMES[d.getDay()]})`;
 }
 
 export default function StatementPage() {
@@ -38,7 +49,7 @@ export default function StatementPage() {
     async function load() {
       const { data } = await supabase
         .from('orders')
-        .select('*, stores(name, short_name, owner_name, address, contact_name, contact_phone), order_items(*)')
+        .select('*, stores(name, short_name, owner_name, address, contact_name, contact_phone, allow_split_shipping), order_items(*)')
         .eq('id', id)
         .single();
 
@@ -59,6 +70,10 @@ export default function StatementPage() {
   const orderDate = new Date(order.created_at);
   const dateStr = `${orderDate.getFullYear()}년 ${orderDate.getMonth() + 1}월 ${orderDate.getDate()}일`;
   const totalQty = order.order_items.reduce((sum, i) => sum + i.quantity, 0);
+  // 점주가 직접 배송일을 선택하는 매장이면 요청 배송일을 명세서 상단에 표기
+  const requestedShipLabel = order.stores.allow_split_shipping && order.ship_date
+    ? formatShipDate(order.ship_date)
+    : null;
 
   return (
     <>
@@ -143,6 +158,14 @@ export default function StatementPage() {
             </table>
           </div>
         </div>
+
+        {/* 요청 배송일 배너 (동일옥처럼 매장이 배송일 선택한 경우만) */}
+        {requestedShipLabel && (
+          <div className="mb-4 border-2 border-purple-300 bg-purple-50 rounded px-4 py-2 flex items-center justify-between">
+            <span className="text-sm font-bold text-purple-900">📅 요청 배송일</span>
+            <span className="text-base font-bold text-purple-800">{requestedShipLabel}</span>
+          </div>
+        )}
 
         {/* 품목 테이블 */}
         <table className="w-full border-collapse text-sm mb-6">

@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
-import { getDeliverySchedule } from '@/lib/delivery-schedule';
+import { isPastDeadlineForStore } from '@/lib/delivery-schedule';
 
 // 주문 수정 (수량 변경)
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -18,10 +18,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  // 주문 조회
+  // 주문 조회 — store 전체 (delivery_days, override 포함)
   const { data: order } = await adminSupabase
     .from('orders')
-    .select('*, stores(region)')
+    .select('*, stores(region, delivery_days, deadline_override_until)')
     .eq('id', id)
     .single();
 
@@ -55,14 +55,15 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: '수정 권한이 없습니다.' }, { status: 403 });
   }
 
-  // 가맹점: 마감 후 수정 불가
-  if (isStore) {
-    const region = order.stores?.region as 'seoul' | 'jeju';
-    if (region) {
-      const schedule = getDeliverySchedule(region);
-      if (schedule.isPastDeadline) {
-        return NextResponse.json({ error: '발주 마감 후에는 수정할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
-      }
+  // 가맹점: 마감 후 수정 불가 (override 활성이면 허용)
+  if (isStore && order.stores) {
+    const s = order.stores as {
+      region: 'seoul' | 'jeju';
+      delivery_days: number[] | null;
+      deadline_override_until: string | null;
+    };
+    if (isPastDeadlineForStore(s)) {
+      return NextResponse.json({ error: '발주 마감 후에는 수정할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
     }
   }
 
@@ -240,7 +241,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 
   const { data: order } = await adminSupabase
     .from('orders')
-    .select('*, stores(region)')
+    .select('*, stores(region, delivery_days, deadline_override_until)')
     .eq('id', id)
     .single();
 
@@ -273,14 +274,15 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     return NextResponse.json({ error: '취소 권한이 없습니다.' }, { status: 403 });
   }
 
-  // 가맹점: 마감 후 취소 불가
-  if (profile?.role === 'store') {
-    const region = order.stores?.region as 'seoul' | 'jeju';
-    if (region) {
-      const schedule = getDeliverySchedule(region);
-      if (schedule.isPastDeadline) {
-        return NextResponse.json({ error: '발주 마감 후에는 취소할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
-      }
+  // 가맹점: 마감 후 취소 불가 (override 활성이면 허용)
+  if (profile?.role === 'store' && order.stores) {
+    const s = order.stores as {
+      region: 'seoul' | 'jeju';
+      delivery_days: number[] | null;
+      deadline_override_until: string | null;
+    };
+    if (isPastDeadlineForStore(s)) {
+      return NextResponse.json({ error: '발주 마감 후에는 취소할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
     }
   }
 

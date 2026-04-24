@@ -23,6 +23,9 @@ export interface Store {
   region: 'seoul' | 'jeju';
   is_direct: boolean; // 직영점 여부
   deposit_balance: number;
+  delivery_days: number[] | null;          // Date.getDay() 기준 배송요일. null=region 기본값
+  allow_split_shipping: boolean;           // true면 아이템별 ship_date 분할 주문 가능 (동일옥)
+  deadline_override_until: string | null;  // 관리자가 마감 연장한 경우 해당 시각까지 마감 무시
   created_at: string;
 }
 

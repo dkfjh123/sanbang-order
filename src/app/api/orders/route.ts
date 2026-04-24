@@ -1,7 +1,21 @@
 import { createClient } from '@supabase/supabase-js';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
-import { getDeliverySchedule } from '@/lib/delivery-schedule';
+import { getStoreDeliverySchedule, toLocalISODate } from '@/lib/delivery-schedule';
+
+const MIN_ORDER_AMOUNT = 150000;
+
+type OrderItemInput = {
+  product_id: string;
+  product_name: string;
+  product_type: string;
+  quantity: number;
+  unit_price: number;
+  unit_price_with_tax: number;
+  is_tax_free: boolean;
+  unit?: 'box' | 'pack';
+  pack_per_box?: number;
+};
 
 export async function POST(request: Request) {
   const serverSupabase = await createServerClient();
@@ -22,19 +36,22 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { store_id, items, memo } = body;
+  const { store_id, items, memo, ship_date } = body as {
+    store_id: string;
+    items: OrderItemInput[];
+    memo?: string;
+    ship_date?: string | null; // 동일옥 전용: 점주가 선택한 이 주문의 배송일
+  };
 
   if (!store_id || !items || items.length === 0) {
     return NextResponse.json({ error: '발주 항목을 선택해주세요.' }, { status: 400 });
   }
 
-  // Service Role로 처리 (RLS 우회)
   const adminSupabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  // 가맹점 정보 조회
   const { data: store } = await adminSupabase
     .from('stores')
     .select('*')
@@ -47,13 +64,11 @@ export async function POST(request: Request) {
 
   // 총액 계산
   const totalAmount = items.reduce(
-    (sum: number, item: { unit_price_with_tax: number; quantity: number }) =>
-      sum + item.unit_price_with_tax * item.quantity,
+    (sum, item) => sum + item.unit_price_with_tax * item.quantity,
     0
   );
 
-  // 최소발주금액 확인
-  const MIN_ORDER_AMOUNT = 150000;
+  // 최소발주금액 (주문 총액 기준 — 동일옥도 동일)
   if (totalAmount < MIN_ORDER_AMOUNT) {
     return NextResponse.json({
       error: `최소발주금액은 ₩${MIN_ORDER_AMOUNT.toLocaleString()}입니다.`,
@@ -67,23 +82,55 @@ export async function POST(request: Request) {
     }, { status: 400 });
   }
 
+  // 배송일 결정
+  //  - 동일옥(allow_split_shipping=true): 점주가 선택한 ship_date 사용 (필수) + 매장 배송요일인지 검증
+  //  - 그 외: delivery-schedule 자동 계산
+  let shipDateStr: string;
+  if (store.allow_split_shipping) {
+    if (!ship_date) {
+      return NextResponse.json({ error: '배송일을 선택해주세요.' }, { status: 400 });
+    }
+    const d = new Date(`${ship_date}T00:00:00`);
+    if (Number.isNaN(d.getTime())) {
+      return NextResponse.json({ error: '배송일 형식이 올바르지 않습니다.' }, { status: 400 });
+    }
+    const allowedDays = new Set<number>((store.delivery_days as number[] | null) || []);
+    if (allowedDays.size === 0) {
+      return NextResponse.json({
+        error: '매장의 배송요일이 설정되지 않았습니다. 관리자에게 문의하세요.',
+      }, { status: 400 });
+    }
+    if (!allowedDays.has(d.getDay())) {
+      return NextResponse.json({
+        error: `선택한 배송일 ${ship_date} 은 이 매장의 배송요일이 아닙니다.`,
+      }, { status: 400 });
+    }
+    // 과거 날짜 방지
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (d.getTime() < today.getTime()) {
+      return NextResponse.json({
+        error: '배송일은 오늘 이후로 선택해 주세요.',
+      }, { status: 400 });
+    }
+    shipDateStr = ship_date;
+  } else {
+    const schedule = getStoreDeliverySchedule({
+      region: store.region,
+      delivery_days: store.delivery_days,
+      deadline_override_until: store.deadline_override_until,
+    });
+    shipDateStr = toLocalISODate(schedule.shipDate);
+  }
+
   // 재고 확인 (박스/낱팩 단위 별도)
-  const productIds = items.map((item: { product_id: string }) => item.product_id);
+  const productIds = items.map((item) => item.product_id);
   const { data: inventoryData } = await adminSupabase
     .from('inventory')
     .select('product_id, quantity, loose_pack_qty, products(name, pack_per_box)')
     .in('product_id', productIds);
 
-  type OrderItemInput = {
-    product_id: string;
-    product_name: string;
-    product_type: string;
-    quantity: number;
-    unit?: 'box' | 'pack';
-    pack_per_box?: number;
-  };
-
-  for (const item of items as OrderItemInput[]) {
+  for (const item of items) {
     const unit = item.unit || 'box';
     const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id) as
       | { quantity: number; loose_pack_qty: number; products: { pack_per_box: number } | null }
@@ -95,7 +142,7 @@ export async function POST(request: Request) {
           error: `${item.product_name} 재고가 등록되지 않았습니다. 관리자에게 문의하세요.`,
         }, { status: 400 });
       }
-      continue; // 범용상품은 재고 레코드 없어도 통과 (기존 동작)
+      continue;
     }
 
     if (unit === 'box') {
@@ -105,7 +152,6 @@ export async function POST(request: Request) {
         }, { status: 400 });
       }
     } else {
-      // 팩 주문: 낱팩 + 박스를 깨서 충당 가능한지 확인
       const ppb = item.pack_per_box || inv.products?.pack_per_box || 1;
       const availablePacks = inv.loose_pack_qty + inv.quantity * ppb;
       if (availablePacks < item.quantity) {
@@ -116,17 +162,11 @@ export async function POST(request: Request) {
     }
   }
 
-  // 주문번호 생성
-  const now = new Date();
-  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+  // 주문번호 생성 — 한국 시각 기준
+  const dateStr = toLocalISODate(new Date()).replace(/-/g, '');
   const { data: seqData } = await adminSupabase.rpc('nextval', { seq_name: 'order_number_seq' }).single();
   const seq = seqData || Math.floor(Math.random() * 9999);
   const orderNumber = `ORD-${dateStr}-${String(seq).padStart(4, '0')}`;
-
-  // 출고일 자동 계산
-  const region = store.region as 'seoul' | 'jeju';
-  const schedule = getDeliverySchedule(region);
-  const shipDateStr = schedule.shipDate.toISOString().slice(0, 10);
 
   // 주문 생성
   const { data: order, error: orderError } = await adminSupabase
@@ -147,18 +187,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: orderError.message }, { status: 400 });
   }
 
-  // 주문 상세 생성 (unit / pack_per_box 스냅샷 포함)
-  const orderItems = (items as Array<{
-    product_id: string;
-    product_name: string;
-    product_type: string;
-    quantity: number;
-    unit_price: number;
-    unit_price_with_tax: number;
-    is_tax_free: boolean;
-    unit?: 'box' | 'pack';
-    pack_per_box?: number;
-  }>).map((item) => {
+  // 주문 상세 생성 — 모든 아이템의 ship_date는 주문 전체와 동일
+  const orderItems = items.map((item) => {
     const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id) as
       | { products: { pack_per_box: number } | null }
       | undefined;
@@ -175,6 +205,7 @@ export async function POST(request: Request) {
       subtotal: item.unit_price_with_tax * item.quantity,
       unit: item.unit || 'box',
       pack_per_box: ppb,
+      ship_date: shipDateStr,
     };
   });
 
@@ -187,9 +218,6 @@ export async function POST(request: Request) {
   }
 
   // 재고 차감
-  //  - 박스 주문(unit='box'): 기존 직접 경로 유지 (inventory.quantity -= qty + inventory_transactions insert)
-  //  - 팩 주문 (unit='pack'): apply_b2b_inventory_delta RPC 재사용 (낱팩 먼저, 부족분은 박스 깨서 충당)
-  //  - 팩 RPC 실패 시 앞서 차감한 박스/팩을 모두 복구
   const appliedBox: Array<{ product_id: string; quantity: number }> = [];
   const appliedPack: Array<{ product_id: string; quantity: number }> = [];
 
@@ -216,12 +244,7 @@ export async function POST(request: Request) {
   };
 
   if (inventoryData && inventoryData.length > 0) {
-    for (const item of items as Array<{
-      product_id: string;
-      product_name: string;
-      quantity: number;
-      unit?: 'box' | 'pack';
-    }>) {
+    for (const item of items) {
       const unit: 'box' | 'pack' = item.unit || 'box';
       const inv = inventoryData.find((i: { product_id: string }) => i.product_id === item.product_id);
       if (!inv) continue;

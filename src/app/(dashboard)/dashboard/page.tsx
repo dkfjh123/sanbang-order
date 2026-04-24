@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { getDeliverySchedule, type DeliveryInfo } from '@/lib/delivery-schedule';
+import { getStoreDeliverySchedule, type DeliveryInfo } from '@/lib/delivery-schedule';
 import type { Profile, DepositRequest } from '@/types';
 
 interface DepositTransaction {
@@ -29,9 +29,19 @@ interface StoreSummary {
   id: string;
   name: string;
   short_name: string;
-  region: string;
+  region: 'seoul' | 'jeju';
   is_direct: boolean;
   deposit_balance: number;
+  delivery_days: number[] | null;
+  allow_split_shipping: boolean;
+  deadline_override_until: string | null;
+}
+
+const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
+function describeDeliveryDays(store: StoreSummary): string {
+  if (store.region === 'jeju') return '주1회 (목상차)';
+  const days = store.delivery_days && store.delivery_days.length > 0 ? store.delivery_days : [1, 3, 5];
+  return [...new Set(days)].sort((a, b) => a - b).map((d) => DAY_NAMES[d]).join('·');
 }
 
 const typeLabel: Record<string, { text: string; color: string }> = {
@@ -58,7 +68,10 @@ export default function DashboardPage() {
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [notices, setNotices] = useState<{ id: string; title: string; is_pinned: boolean; created_at: string }[]>([]);
   const [storeRegion, setStoreRegion] = useState<'seoul' | 'jeju' | null>(null);
+  const [storeDeliveryDays, setStoreDeliveryDays] = useState<number[] | null>(null);
+  const [storeOverrideUntil, setStoreOverrideUntil] = useState<string | null>(null);
   const [deliveryInfo, setDeliveryInfo] = useState<DeliveryInfo | null>(null);
+  const [extendingStoreId, setExtendingStoreId] = useState<string | null>(null);
   const [jejuPalletBoxes, setJejuPalletBoxes] = useState<number>(0);
   const [todayOrders, setTodayOrders] = useState(0);
   const [pendingDelivery, setPendingDelivery] = useState(0);
@@ -80,9 +93,15 @@ export default function DashboardPage() {
 
   const updateDeliveryInfo = useCallback(() => {
     if (storeRegion) {
-      setDeliveryInfo(getDeliverySchedule(storeRegion));
+      setDeliveryInfo(
+        getStoreDeliverySchedule({
+          region: storeRegion,
+          delivery_days: storeDeliveryDays,
+          deadline_override_until: storeOverrideUntil,
+        })
+      );
     }
-  }, [storeRegion]);
+  }, [storeRegion, storeDeliveryDays, storeOverrideUntil]);
 
   useEffect(() => {
     updateDeliveryInfo();
@@ -107,13 +126,15 @@ export default function DashboardPage() {
       if (prof.store_id) {
         const { data: store } = await supabase
           .from('stores')
-          .select('name, deposit_balance, region')
+          .select('name, deposit_balance, region, delivery_days, deadline_override_until')
           .eq('id', prof.store_id)
           .single();
         if (store) {
           setStoreName(store.name);
           setDepositBalance(store.deposit_balance);
           setStoreRegion(store.region as 'seoul' | 'jeju');
+          setStoreDeliveryDays(store.delivery_days as number[] | null);
+          setStoreOverrideUntil(store.deadline_override_until as string | null);
         }
 
         // 가맹점: 본인 매장 최근 충전 내역
@@ -127,10 +148,10 @@ export default function DashboardPage() {
       }
 
       if (prof.role === 'admin') {
-        // 가맹점 수 + 목록
+        // 가맹점 수 + 목록 (배송요일/마감override 포함)
         const { data: stores } = await supabase
           .from('stores')
-          .select('id, name, short_name, region, is_direct, deposit_balance')
+          .select('id, name, short_name, region, is_direct, deposit_balance, delivery_days, allow_split_shipping, deadline_override_until')
           .order('name');
         setStoreList((stores as StoreSummary[]) || []);
         setStoreCount(stores?.length || 0);
@@ -334,6 +355,22 @@ export default function DashboardPage() {
           {storeName && ` · ${storeName}`}
         </p>
       </div>
+
+      {/* ========== 관리자: 매장별 배송요일 & 마감관리 ========== */}
+      {profile.role === 'admin' && storeList.length > 0 && (
+        <StoreDeliveryPanel
+          stores={storeList}
+          extendingStoreId={extendingStoreId}
+          setExtendingStoreId={setExtendingStoreId}
+          onRefresh={async () => {
+            const { data: stores } = await supabase
+              .from('stores')
+              .select('id, name, short_name, region, is_direct, deposit_balance, delivery_days, allow_split_shipping, deadline_override_until')
+              .order('name');
+            setStoreList((stores as StoreSummary[]) || []);
+          }}
+        />
+      )}
 
       {/* ========== 관리자 대시보드 ========== */}
       {profile.role === 'admin' && (
@@ -602,56 +639,68 @@ export default function DashboardPage() {
 
           {/* 배송 스케줄 안내 */}
           {deliveryInfo && (
-            <div className={`rounded-xl shadow-sm border overflow-hidden ${
+            <div className={`rounded-xl shadow-sm border-2 overflow-hidden ${
               deliveryInfo.isPastDeadline
-                ? 'bg-red-50 border-red-200'
-                : deliveryInfo.remainingMs < 3600000
-                  ? 'bg-amber-50 border-amber-200'
-                  : 'bg-emerald-50 border-emerald-200'
+                ? 'bg-red-50 border-red-300'
+                : deliveryInfo.isOverrideActive
+                  ? 'bg-purple-50 border-purple-300'
+                  : deliveryInfo.remainingMs < 3600000
+                    ? 'bg-amber-50 border-amber-300'
+                    : 'bg-emerald-50 border-emerald-300'
             }`}>
-              <div className={`px-4 py-2.5 text-sm font-semibold flex items-center justify-between ${
+              <div className={`px-5 py-3 text-base font-bold flex items-center justify-between ${
                 deliveryInfo.isPastDeadline
                   ? 'bg-red-100 text-red-800'
-                  : deliveryInfo.remainingMs < 3600000
-                    ? 'bg-amber-100 text-amber-800'
-                    : 'bg-emerald-100 text-emerald-800'
+                  : deliveryInfo.isOverrideActive
+                    ? 'bg-purple-100 text-purple-800'
+                    : deliveryInfo.remainingMs < 3600000
+                      ? 'bg-amber-100 text-amber-800'
+                      : 'bg-emerald-100 text-emerald-800'
               }`}>
                 <span>{storeRegion === 'jeju' ? '제주 배송 스케줄' : '서울·내륙 배송 스케줄'}</span>
-                <a href="/orders/new" className="text-xs underline opacity-75 hover:opacity-100">발주하기 →</a>
+                <a href="/orders/new" className="text-sm underline opacity-75 hover:opacity-100">발주하기 →</a>
               </div>
-              <div className="px-4 py-4">
-                <p className="text-xs text-gray-500 mb-3 text-center">{deliveryInfo.scheduleDescription}</p>
+              <div className="px-5 py-2 text-center text-sm text-gray-600 border-b border-white/50">
+                {deliveryInfo.scheduleDescription}
+              </div>
+              <div className="px-5 py-5">
                 {deliveryInfo.isPastDeadline ? (
-                  <div className="text-center">
-                    <p className="text-red-700 font-bold">이번 주 발주 마감 완료</p>
-                    <p className="text-red-600 text-sm mt-1">다음 마감: {deliveryInfo.deadlineLabel}</p>
+                  <div className="text-center py-2">
+                    <p className="text-red-700 font-bold text-xl">이번 주 발주 마감 완료</p>
+                    <p className="text-red-600 text-base mt-2">다음 마감: <b>{deliveryInfo.deadlineLabel}</b></p>
                   </div>
                 ) : (
                   <>
                     <div className="grid grid-cols-3 gap-3 text-center">
-                      <div className="bg-white/60 rounded-lg py-2.5 px-2">
-                        <p className="text-xs text-gray-500 mb-0.5">발주 마감</p>
-                        <p className="font-bold text-gray-800 text-sm">{deliveryInfo.deadlineLabel}</p>
+                      <div className="bg-white/70 rounded-lg py-3 px-2">
+                        <p className="text-xs text-gray-500 mb-1 font-medium">발주 마감</p>
+                        <p className="font-bold text-gray-800 text-lg leading-tight">{deliveryInfo.deadlineLabel}</p>
                       </div>
-                      <div className="bg-white/60 rounded-lg py-2.5 px-2">
-                        <p className="text-xs text-gray-500 mb-0.5">{storeRegion === 'jeju' ? '상차일' : '출고일'}</p>
-                        <p className="font-bold text-gray-800 text-sm">{deliveryInfo.shipLabel}</p>
+                      <div className="bg-white/70 rounded-lg py-3 px-2">
+                        <p className="text-xs text-gray-500 mb-1 font-medium">{storeRegion === 'jeju' ? '상차일' : '출고일'}</p>
+                        <p className="font-bold text-gray-800 text-lg leading-tight">{deliveryInfo.shipLabel}</p>
                       </div>
-                      <div className="bg-white/60 rounded-lg py-2.5 px-2">
-                        <p className="text-xs text-gray-500 mb-0.5">{storeRegion === 'jeju' ? '도착 예정' : '배송일'}</p>
-                        <p className="font-bold text-gray-800 text-sm">{deliveryInfo.arrivalLabel}</p>
+                      <div className="bg-white/70 rounded-lg py-3 px-2">
+                        <p className="text-xs text-gray-500 mb-1 font-medium">{storeRegion === 'jeju' ? '도착 예정' : '배송일'}</p>
+                        <p className="font-bold text-gray-800 text-lg leading-tight">{deliveryInfo.arrivalLabel}</p>
                       </div>
                     </div>
-                    <div className={`mt-3 text-center py-2 rounded-lg ${
-                      deliveryInfo.remainingMs < 3600000 ? 'bg-amber-100' : 'bg-emerald-100'
+                    <div className={`mt-4 text-center py-3 rounded-lg ${
+                      deliveryInfo.isOverrideActive
+                        ? 'bg-purple-200'
+                        : deliveryInfo.remainingMs < 3600000
+                          ? 'bg-amber-200'
+                          : 'bg-emerald-200'
                     }`}>
-                      <span className="text-xs text-gray-500">마감까지 </span>
-                      <span className={`font-bold text-base ${
-                        deliveryInfo.remainingMs < 3600000 ? 'text-amber-700' : 'text-emerald-700'
+                      <span className="text-sm text-gray-700">마감까지 </span>
+                      <span className={`font-bold text-xl ${
+                        deliveryInfo.isOverrideActive
+                          ? 'text-purple-800'
+                          : deliveryInfo.remainingMs < 3600000 ? 'text-amber-800' : 'text-emerald-800'
                       }`}>
                         {deliveryInfo.remainingLabel}
                       </span>
-                      <span className="text-xs text-gray-500"> 남음</span>
+                      <span className="text-sm text-gray-700"> 남음</span>
                     </div>
                   </>
                 )}
@@ -778,6 +827,166 @@ export default function DashboardPage() {
 }
 
 /* ========== 공통 컴포넌트 ========== */
+
+function StoreDeliveryPanel({
+  stores,
+  extendingStoreId,
+  setExtendingStoreId,
+  onRefresh,
+}: {
+  stores: StoreSummary[];
+  extendingStoreId: string | null;
+  setExtendingStoreId: (id: string | null) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const [collapsed, setCollapsed] = useState(true);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 마감 연장 활성 매장 수
+  const overrideCount = stores.filter(
+    (s) => !!s.deadline_override_until && new Date(s.deadline_override_until).getTime() > now
+  ).length;
+
+  const extend = async (storeId: string, minutes: number) => {
+    const res = await fetch(`/api/admin/stores/${storeId}/deadline-override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'extend', minutes }),
+    });
+    if (res.ok) {
+      setExtendingStoreId(null);
+      await onRefresh();
+    } else {
+      const { error } = await res.json().catch(() => ({ error: '실패' }));
+      alert(error || '실패');
+    }
+  };
+
+  const clear = async (storeId: string) => {
+    const res = await fetch(`/api/admin/stores/${storeId}/deadline-override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clear' }),
+    });
+    if (res.ok) {
+      await onRefresh();
+    }
+  };
+
+  // 오늘 자정까지 남은 분 (선택지 중 하나)
+  const minutesUntilMidnight = () => {
+    const d = new Date();
+    const midnight = new Date(d);
+    midnight.setHours(24, 0, 0, 0);
+    return Math.max(1, Math.round((midnight.getTime() - d.getTime()) / 60000));
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <button
+        onClick={() => setCollapsed((v) => !v)}
+        className="w-full px-5 py-3 border-b border-gray-200 flex items-center justify-between hover:bg-gray-50 transition text-left"
+      >
+        <div className="flex items-center gap-2 flex-wrap">
+          <h3 className="font-bold text-gray-800">매장별 배송 요일 · 마감관리</h3>
+          <span className="text-xs text-gray-500">({stores.length}곳)</span>
+          {overrideCount > 0 && (
+            <span className="text-xs font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded animate-pulse">
+              🔓 {overrideCount}곳 마감연장 중
+            </span>
+          )}
+        </div>
+        <span className={`text-gray-400 text-sm transition-transform ${collapsed ? '' : 'rotate-180'}`}>▼</span>
+      </button>
+      {!collapsed && (
+      <div className="divide-y divide-gray-100">
+        {stores.map((s) => {
+          const overrideActive = !!s.deadline_override_until &&
+            new Date(s.deadline_override_until).getTime() > now;
+          const overrideRemaining = overrideActive
+            ? Math.max(0, Math.round((new Date(s.deadline_override_until!).getTime() - now) / 60000))
+            : 0;
+          const isExtending = extendingStoreId === s.id;
+
+          return (
+            <div key={s.id} className="px-5 py-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-gray-800">{s.short_name || s.name}</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    s.is_direct ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'
+                  }`}>
+                    {s.is_direct ? '직영' : '가맹'}
+                  </span>
+                  <span className="text-xs text-gray-400">
+                    {s.region === 'jeju' ? '제주' : '서울·내륙'}
+                  </span>
+                  <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
+                    배송 {describeDeliveryDays(s)}
+                  </span>
+                  {s.allow_split_shipping && (
+                    <span className="text-xs font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded">
+                      배송일 선택
+                    </span>
+                  )}
+                  {overrideActive && (
+                    <span className="text-xs font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded animate-pulse">
+                      🔓 마감연장 {Math.floor(overrideRemaining / 60)}시간 {overrideRemaining % 60}분 남음
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex gap-2 items-center">
+                  {overrideActive ? (
+                    <button
+                      onClick={() => clear(s.id)}
+                      className="px-3 py-1 bg-orange-600 text-white rounded text-xs font-medium hover:bg-orange-700"
+                    >
+                      마감 연장 해제
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setExtendingStoreId(isExtending ? null : s.id)}
+                      className="px-3 py-1 border border-orange-400 text-orange-700 rounded text-xs font-medium hover:bg-orange-50"
+                    >
+                      {isExtending ? '취소' : '마감 연장'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {isExtending && !overrideActive && (
+                <div className="mt-2 flex gap-2 flex-wrap bg-orange-50 border border-orange-200 rounded-lg p-2">
+                  <span className="text-xs text-orange-900 font-medium self-center">얼마나 연장할까요?</span>
+                  {[
+                    { label: '30분', minutes: 30 },
+                    { label: '1시간', minutes: 60 },
+                    { label: '3시간', minutes: 180 },
+                    { label: '오늘 자정까지', minutes: minutesUntilMidnight() },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      onClick={() => extend(s.id, opt.minutes)}
+                      className="px-3 py-1 bg-orange-600 text-white rounded text-xs font-medium hover:bg-orange-700"
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      )}
+    </div>
+  );
+}
+
 
 function StatCard({
   title,
