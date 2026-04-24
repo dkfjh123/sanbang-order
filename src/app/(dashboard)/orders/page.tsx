@@ -345,24 +345,36 @@ export default function OrdersPage() {
                 </span>
               </div>
               <div className="divide-y divide-gray-100">
-                {storeOrders.map((order) => (
-                  <div
-                    key={order.id}
-                    onClick={() => loadOrderDetail(order)}
-                    className="px-5 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50 transition"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusLabel[order.status]?.color}`}>
-                        {statusLabel[order.status]?.text}
-                      </span>
-                      <span className="text-sm text-gray-800">{order.order_number}</span>
-                      <span className="text-xs text-gray-400">
-                        {new Date(order.created_at).toLocaleDateString('ko-KR')}
-                      </span>
+                {storeOrders.map((order) => {
+                  const dateChosen = order.stores?.allow_split_shipping;
+                  return (
+                    <div
+                      key={order.id}
+                      onClick={() => loadOrderDetail(order)}
+                      className="px-5 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50 transition gap-3"
+                    >
+                      <div className="flex items-center gap-3 flex-wrap min-w-0">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusLabel[order.status]?.color}`}>
+                          {statusLabel[order.status]?.text}
+                        </span>
+                        <span className="text-sm text-gray-800">{order.order_number}</span>
+                        {order.ship_date && (
+                          <span className={`px-3 py-1 rounded-lg text-sm font-bold border-2 ${
+                            dateChosen
+                              ? 'bg-purple-100 text-purple-800 border-purple-300'
+                              : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          }`}>
+                            {dateChosen ? '📅 요청' : '🚚 출고'} {formatShipDate(order.ship_date)}
+                          </span>
+                        )}
+                        <span className="text-xs text-gray-400">
+                          주문 {new Date(order.created_at).toLocaleDateString('ko-KR')}
+                        </span>
+                      </div>
+                      <span className="font-semibold text-gray-800 text-sm shrink-0">₩{order.total_amount.toLocaleString()}</span>
                     </div>
-                    <span className="font-semibold text-gray-800 text-sm">₩{order.total_amount.toLocaleString()}</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -377,6 +389,14 @@ export default function OrdersPage() {
               <h3 className="text-lg font-bold text-gray-800">{selectedOrder.order_number}</h3>
               <button onClick={() => setSelectedOrder(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
             </div>
+
+            {/* 요청 배송일 배너 — 동일옥처럼 점주가 직접 선택하는 매장의 주문에만 */}
+            {selectedOrder.stores?.allow_split_shipping && selectedOrder.ship_date && (
+              <div className="mb-4 bg-purple-100 border-2 border-purple-400 rounded-xl px-4 py-3 flex items-center justify-between shadow-sm">
+                <span className="text-sm font-bold text-purple-900">📅 점주 요청 배송일</span>
+                <span className="text-xl font-extrabold text-purple-900">{formatShipDate(selectedOrder.ship_date)}</span>
+              </div>
+            )}
 
             <div className="space-y-3 mb-4">
               <div className="flex justify-between text-sm">
@@ -607,19 +627,21 @@ function OrderCard({ order, onClick }: { order: Order; onClick: () => void }) {
       onClick={onClick}
       className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 cursor-pointer hover:border-[#2D6A4F] transition"
     >
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center justify-between mb-2 gap-2">
+        <div className="flex items-center gap-2 flex-wrap min-w-0">
           <span className="font-semibold text-gray-800 text-sm">{order.order_number}</span>
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${st.color}`}>{st.text}</span>
           {order.ship_date && (
-            <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-              dateChosen ? 'bg-purple-100 text-purple-700' : 'bg-emerald-50 text-emerald-700'
+            <span className={`px-3 py-1 rounded-lg text-sm font-bold border-2 ${
+              dateChosen
+                ? 'bg-purple-100 text-purple-800 border-purple-300'
+                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
             }`}>
-              {dateChosen ? '요청 배송일' : '출고'} {formatShipDate(order.ship_date)}
+              {dateChosen ? '📅 요청 배송일' : '🚚 출고'} {formatShipDate(order.ship_date)}
             </span>
           )}
         </div>
-        <span className="font-bold text-gray-800">₩{order.total_amount.toLocaleString()}</span>
+        <span className="font-bold text-gray-800 shrink-0">₩{order.total_amount.toLocaleString()}</span>
       </div>
       <div className="flex items-center justify-between text-sm text-gray-500">
         <span>{storeName}</span>

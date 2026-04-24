@@ -73,7 +73,7 @@ export default function NewOrderPage() {
 
   const allowChooseShipDate = !!store?.allow_split_shipping;
 
-  // 이 매장의 가능 배송일 (동일옥용 드롭다운 옵션) — 가장 가까운 2개만 노출
+  // 이 매장의 가능 배송일 (동일옥용 드롭다운 옵션) — 가장 가까운 3개 노출
   const upcomingDates: string[] = store
     ? getUpcomingDeliveryDates(
         {
@@ -81,7 +81,7 @@ export default function NewOrderPage() {
           delivery_days: store.delivery_days,
           deadline_override_until: store.deadline_override_until,
         },
-        2
+        3
       ).map((d) => toLocalISODate(d))
     : [];
 
