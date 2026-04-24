@@ -74,7 +74,8 @@ export default function OrdersPage() {
   const [editReason, setEditReason] = useState('');
   const [cancelling, setCancelling] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  // 처리 대기 건이 가장 먼저 눈에 띄도록 기본 필터를 '대기'로 설정
+  const [statusFilter, setStatusFilter] = useState<string>('pending');
   const [viewMode, setViewMode] = useState<'list' | 'store'>('list');
   const supabase = createClient();
 
