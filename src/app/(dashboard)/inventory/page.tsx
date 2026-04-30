@@ -37,6 +37,16 @@ const storageLabel: Record<string, string> = {
   room_temp: '상온',
 };
 
+// 해당 월의 [1일, 말일] 반환 (YYYY-MM-DD) — timezone-safe (UTC 산술)
+function monthRange(year: number, month: number) {
+  const start = `${year}-${String(month).padStart(2, '0')}-01`;
+  const endY = month === 12 ? year + 1 : year;
+  const endM = month === 12 ? 1 : month + 1;
+  const e = new Date(`${endY}-${String(endM).padStart(2, '0')}-01T00:00:00Z`);
+  e.setUTCDate(e.getUTCDate() - 1);
+  return { start, end: e.toISOString().slice(0, 10) };
+}
+
 export default function InventoryPage() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [transactions, setTransactions] = useState<InventoryTx[]>([]);
@@ -49,6 +59,12 @@ export default function InventoryPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [txFilter, setTxFilter] = useState('');
+  // 입출고 이력 기간/타입 필터
+  const _initRange = monthRange(new Date().getFullYear(), new Date().getMonth() + 1);
+  const [txStartDate, setTxStartDate] = useState(_initRange.start);
+  const [txEndDate, setTxEndDate] = useState(_initRange.end);
+  const [txTypeFilter, setTxTypeFilter] = useState<'all' | 'inbound' | 'outbound'>('all');
+  const [txLoading, setTxLoading] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [userRole, setUserRole] = useState<string>('');
   const [pendingToggle, setPendingToggle] = useState<{ productId: string; next: boolean } | null>(null);
@@ -64,6 +80,8 @@ export default function InventoryPage() {
       }
     });
     loadData();
+    loadTransactions(_initRange.start, _initRange.end);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function loadData() {
@@ -103,16 +121,34 @@ export default function InventoryPage() {
       }));
 
     setItems([...existingItems, ...missingItems]);
+    setLoading(false);
+  }
+
+  // 입출고 이력 조회 (기간 기준 KR 자정, 타입은 client-side 필터)
+  async function loadTransactions(start: string, end: string) {
+    setTxLoading(true);
+    // KR 자정 기준 [start, end+1) — UTC 산술로 다음날 계산하고 +09:00 timezone 명시
+    const dt = new Date(`${end}T00:00:00Z`);
+    dt.setUTCDate(dt.getUTCDate() + 1);
+    const endNextDate = dt.toISOString().slice(0, 10);
+    const startKR = `${start}T00:00:00+09:00`;
+    const endNextKR = `${endNextDate}T00:00:00+09:00`;
 
     const { data: txs } = await supabase
       .from('inventory_transactions')
       .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .gte('created_at', startKR)
+      .lt('created_at', endNextKR)
+      .order('created_at', { ascending: false });
     setTransactions((txs as InventoryTx[]) || []);
-
-    setLoading(false);
+    setTxLoading(false);
   }
+
+  const handleTxSearch = () => {
+    if (!txStartDate || !txEndDate) return;
+    if (txStartDate > txEndDate) return;
+    loadTransactions(txStartDate, txEndDate);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -190,6 +226,7 @@ export default function InventoryPage() {
     setTxQty('');
     setTxDesc('');
     loadData();
+    loadTransactions(txStartDate, txEndDate);
   };
 
   const getProductName = (productId: string) => {
@@ -228,9 +265,11 @@ export default function InventoryPage() {
     ));
   };
 
-  const filteredTx = txFilter
-    ? transactions.filter((tx) => tx.product_id === txFilter)
-    : transactions;
+  const filteredTx = transactions.filter((tx) => {
+    if (txFilter && tx.product_id !== txFilter) return false;
+    if (txTypeFilter !== 'all' && tx.type !== txTypeFilter) return false;
+    return true;
+  });
 
   if (loading) {
     return (
@@ -344,13 +383,75 @@ export default function InventoryPage() {
 
       {/* 입출고 이력 */}
       <div ref={txSectionRef} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-          <h3 className="font-semibold text-gray-700 text-sm">입출고 이력</h3>
-          <div className="flex items-center gap-2">
+        <div className="px-4 py-3 border-b border-gray-200 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h3 className="font-semibold text-gray-700 text-sm">입출고 이력</h3>
+            <span className="text-xs text-gray-500">{filteredTx.length}건</span>
+          </div>
+          {/* 기간 + 조회 */}
+          <div className="flex items-center flex-wrap gap-2">
+            <input
+              type="date"
+              value={txStartDate}
+              onChange={(e) => setTxStartDate(e.target.value)}
+              className="text-sm px-2 py-1.5 border border-gray-300 rounded-lg text-gray-700"
+            />
+            <span className="text-gray-400 text-xs">~</span>
+            <input
+              type="date"
+              value={txEndDate}
+              onChange={(e) => setTxEndDate(e.target.value)}
+              className="text-sm px-2 py-1.5 border border-gray-300 rounded-lg text-gray-700"
+            />
+            <button
+              onClick={() => {
+                const d = new Date();
+                const r = monthRange(d.getFullYear(), d.getMonth() + 1);
+                setTxStartDate(r.start);
+                setTxEndDate(r.end);
+                loadTransactions(r.start, r.end);
+              }}
+              className="px-2 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+            >이번달</button>
+            <button
+              onClick={() => {
+                const d = new Date();
+                d.setDate(1);
+                d.setMonth(d.getMonth() - 1);
+                const r = monthRange(d.getFullYear(), d.getMonth() + 1);
+                setTxStartDate(r.start);
+                setTxEndDate(r.end);
+                loadTransactions(r.start, r.end);
+              }}
+              className="px-2 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50"
+            >지난달</button>
+            <button
+              onClick={handleTxSearch}
+              disabled={txLoading}
+              className="ml-auto px-4 py-1.5 bg-[#1B4332] text-white rounded-lg text-xs font-medium hover:bg-[#2D6A4F] disabled:bg-gray-300"
+            >
+              {txLoading ? '조회 중...' : '조회'}
+            </button>
+          </div>
+          {/* 타입 토글 + 상품 필터 */}
+          <div className="flex items-center flex-wrap gap-2">
+            <div className="inline-flex border border-gray-300 rounded-lg overflow-hidden">
+              {([['all', '전체'], ['inbound', '입고'], ['outbound', '출고']] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setTxTypeFilter(key)}
+                  className={`px-3 py-1.5 text-xs font-medium border-l first:border-l-0 border-gray-300 transition ${
+                    txTypeFilter === key
+                      ? 'bg-[#1B4332] text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >{label}</button>
+              ))}
+            </div>
             <select
               value={txFilter}
               onChange={(e) => setTxFilter(e.target.value)}
-              className="text-sm px-2 py-1 border border-gray-300 rounded-lg text-gray-700"
+              className="text-sm px-2 py-1.5 border border-gray-300 rounded-lg text-gray-700"
             >
               <option value="">전체 상품</option>
               {items.map((item) => (
@@ -361,26 +462,45 @@ export default function InventoryPage() {
             </select>
           </div>
         </div>
-        {filteredTx.length === 0 ? (
+        {txLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">조회 중...</div>
+        ) : filteredTx.length === 0 ? (
           <div className="p-8 text-center text-gray-400 text-sm">이력이 없습니다.</div>
         ) : (
           <div className="divide-y divide-gray-100">
             {filteredTx.map((tx) => {
-              const isIn = tx.quantity > 0;
+              const isB2B = (tx.description || '').includes('B2B');
+              // type 기준으로 부호 결정 (DB에 B2B 출고가 양수로 저장되는 정합성 이슈 회피)
+              const absQty = Math.abs(tx.quantity);
+              const sign =
+                tx.type === 'inbound' ? '+'
+                : tx.type === 'outbound' ? '-'
+                : (tx.quantity > 0 ? '+' : tx.quantity < 0 ? '-' : '');
+              const unitLabel = tx.unit === 'pack' ? '팩' : '박스';
+              const typeLabel = tx.type === 'inbound' ? '입고' : tx.type === 'outbound' ? '출고' : '조정';
+              const typeBadgeClass =
+                tx.type === 'inbound' ? 'bg-emerald-50 text-emerald-700'
+                : tx.type === 'outbound' ? 'bg-rose-50 text-rose-700'
+                : 'bg-gray-100 text-gray-600';
               return (
-                <div key={tx.id} className="px-4 py-3 flex items-center justify-between">
+                <div key={tx.id} className="px-4 py-3 flex items-center justify-between hover:bg-gray-50">
                   <div>
-                    <div className="flex items-center gap-2">
-                      <span className={`text-sm font-medium ${isIn ? 'text-green-600' : 'text-red-600'}`}>
-                        {tx.type === 'inbound' ? '입고' : tx.type === 'outbound' ? '출고' : '조정'}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${typeBadgeClass}`}>
+                        {typeLabel}
                       </span>
-                      <span className="text-sm text-gray-700">{getProductName(tx.product_id)}</span>
+                      <span className="text-sm font-medium text-gray-800">{getProductName(tx.product_id)}</span>
+                      {isB2B && (
+                        <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700">
+                          B2B
+                        </span>
+                      )}
                     </div>
                     {tx.description && <p className="text-xs text-gray-400 mt-0.5">{tx.description}</p>}
                   </div>
-                  <div className="text-right">
-                    <p className={`font-bold ${isIn ? 'text-green-600' : 'text-red-600'}`}>
-                      {isIn ? '+' : ''}{tx.quantity}
+                  <div className="text-right whitespace-nowrap">
+                    <p className="font-semibold text-gray-800">
+                      {sign}{absQty} {unitLabel}
                     </p>
                     <p className="text-xs text-gray-400">
                       {new Date(tx.created_at).toLocaleDateString('ko-KR')}

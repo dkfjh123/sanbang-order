@@ -15,6 +15,7 @@ const menuIcons: Record<string, string> = {
   '/deposits': '·',
   '/inventory': '·',
   '/stores': '·',
+  '/shipments': '·',
   '/settlement': '·',
   '/notices': '·',
 };
