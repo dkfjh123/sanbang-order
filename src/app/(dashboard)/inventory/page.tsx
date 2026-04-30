@@ -27,6 +27,7 @@ interface InventoryTx {
   product_id: string;
   type: string;
   quantity: number;
+  unit: 'box' | 'pack';
   description: string | null;
   created_at: string;
 }
