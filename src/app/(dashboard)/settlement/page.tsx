@@ -77,6 +77,22 @@ const MANUFACTURER_ORDER = ['한만두식품', '윤트리스팟', '다담푸드'
 const SHINWA_FEE_RATE = { jeju: 0.125, seoul: 0.085 } as const; // 전용 배송수수료
 const GENERAL_SUPPLY_RATE = 0.97;                                 // 범용 공급대금 (산방에프앤비 마진 3%)
 
+// 입금 흐름 + 계산서 발행 라벨 (섹션 헤더에 표시)
+function FlowChips({ payment, invoice }: { payment: string; invoice: string }) {
+  return (
+    <div className="flex items-center gap-2 mt-2 text-xs flex-wrap">
+      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+        <span className="font-semibold">입금</span>
+        <span>{payment}</span>
+      </span>
+      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200">
+        <span className="font-semibold">계산서</span>
+        <span>{invoice}</span>
+      </span>
+    </div>
+  );
+}
+
 // 해당 월의 [1일, 말일] 반환 (YYYY-MM-DD) — timezone-safe (UTC 산술)
 function monthRange(year: number, month: number) {
   const start = `${year}-${String(month).padStart(2, '0')}-01`;
@@ -484,6 +500,65 @@ export default function SettlementPage() {
   );
   const sanbangGeneralMargin = shinwaTotal.generalSales - shinwaTotal.generalSupply; // = generalSales × 3%
 
+  // 6섹션 — 산방에프앤비 월간 손익 (출고기준 P&L + 현금흐름 참고)
+  //   매출  : 가맹점(직영 제외) + B2B
+  //   원가  : 출고분 × 산방푸드 판매가 + 신화 전용 수수료 + 신화 범용 공급대금(97%)
+  //   직영(상공회의소점) 정책:
+  //     - 매출/매입 0 (산방에프앤비를 거치지 않음)
+  //     - 단, 5섹션 직영분 신화 수수료는 산방에프앤비 부담 → 비용으로 잡힘
+  //   B2B는 product_id가 없어서 product_name 매핑으로 산방푸드 판매가 조회
+  const productByName = new Map(exclusiveProducts.map((p) => [p.name, p]));
+
+  // 출고기준 매출원가 — 전용상품
+  let exclusiveCogs = 0;
+  orders.forEach((order) => {
+    if (order.stores?.is_direct) return; // 직영 제외 (매출 0이므로 원가도 0)
+    order.order_items.forEach((item) => {
+      if (item.product_type !== 'exclusive') return;
+      if (!item.product_id) return;
+      const p = productMap.get(item.product_id);
+      if (!p) return;
+      const ppb = p.pack_per_box || 1;
+      const boxPrice = p.sanbang_food_sale_price_with_tax;
+      const packPrice = ppb > 1 ? Math.round(boxPrice / ppb) : boxPrice;
+      exclusiveCogs += item.quantity * (item.unit === 'pack' ? packPrice : boxPrice);
+    });
+  });
+  b2bOrders.forEach((order) => {
+    order.b2b_order_items.forEach((item) => {
+      const p = productByName.get(item.product_name);
+      if (!p) return;
+      const ppb = p.pack_per_box || 1;
+      const boxPrice = p.sanbang_food_sale_price_with_tax;
+      const packPrice = ppb > 1 ? Math.round(boxPrice / ppb) : boxPrice;
+      exclusiveCogs += item.quantity * (item.unit === 'pack' ? packPrice : boxPrice);
+    });
+  });
+
+  // 매출 — 가맹점(직영 제외) + B2B
+  const storeRevenue = storeSalesTotal.total; // 1섹션은 이미 직영 제외
+  const b2bRevenue = b2bOrders.reduce(
+    (sum, o) => sum + o.b2b_order_items.reduce((s, i) => s + i.subtotal, 0),
+    0,
+  );
+  const pnlRevenue = storeRevenue + b2bRevenue;
+
+  // 비용
+  const pnlShinwaExclusiveFee = shinwaTotal.exclusiveFee;   // 직영 포함 (산방에프앤비가 부담)
+  const pnlGeneralSupply = shinwaTotal.generalSupply;       // 범용 97%
+  const pnlCosts = exclusiveCogs + pnlShinwaExclusiveFee + pnlGeneralSupply;
+
+  // 영업이익
+  const pnlOperatingProfit = pnlRevenue - pnlCosts;
+  const pnlMargin = pnlRevenue > 0 ? (pnlOperatingProfit / pnlRevenue) * 100 : 0;
+
+  // 현금흐름 (참고)
+  //   직영 후불(4섹션)은 산방푸드 ↔ 직영 직접 결제라 산방에프앤비 통장과 무관
+  const cashIn = storeSalesTotal.total + b2bRevenue;        // 가맹+B2B 입금 (예치금/B2B)
+  const cashOutSanbang = inboundTotal.amount;               // 산방푸드 지급 (입고기준)
+  const cashOutShinwa = shinwaTotal.storeTotal;             // 신화 지급
+  const cashFlow = cashIn - cashOutSanbang - cashOutShinwa;
+
   // 엑셀 다운로드 — 1섹션 가맹점 매출 표 기반
   const downloadExcel = () => {
     const header = ['가맹점', '과세 공급가', '부가세', '과세 합계', '면세 합계', '총 매출'];
@@ -723,6 +798,10 @@ export default function SettlementPage() {
             <p className="text-xs text-gray-500 mt-1">
               산방에프앤비 → 가맹점 · 계산서 발행 대상 · 직영점 제외
             </p>
+            <FlowChips
+              payment="가맹점 → 산방에프앤비 (예치금에서 차감)"
+              invoice="산방에프앤비 → 가맹점 (전용+범용 합산)"
+            />
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500">
@@ -798,6 +877,10 @@ export default function SettlementPage() {
             <p className="text-xs text-gray-500 mt-1">
               기간 내 산방푸드가 보낸 입고분 × 산방푸드 판매가 · 발주/B2B 취소 복구는 제외
             </p>
+            <FlowChips
+              payment="산방에프앤비 → 산방푸드 (전용상품 공급대금)"
+              invoice="산방푸드 → 산방에프앤비"
+            />
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500">
@@ -870,6 +953,10 @@ export default function SettlementPage() {
             <p className="text-xs text-gray-500 mt-1">
               기간 내 입고분 × 제조사 매입가 · 산방푸드가 제조사에 결제할 금액
             </p>
+            <FlowChips
+              payment="산방푸드 → 제조사 (제조사별 합계 기준)"
+              invoice="제조사 → 산방푸드 (원자재 매입)"
+            />
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500">
@@ -970,6 +1057,10 @@ export default function SettlementPage() {
             <p className="text-xs text-gray-500 mt-1">
               기간 내 상공회의소점 출고분 × 산방푸드 판매가 · 같은 법인이라 산방푸드와 직접 거래 (전용상품만)
             </p>
+            <FlowChips
+              payment="상공회의소점 → 산방푸드 (월마감 후 후불)"
+              invoice="산방푸드 → 상공회의소점"
+            />
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500">
@@ -1054,6 +1145,10 @@ export default function SettlementPage() {
             <p className="text-xs text-gray-500 mt-1">
               전용 배송수수료 (제주 12.5% / 육지 8.5%) + 범용 공급대금 (97%) · 직영·B2B 모두 포함, 가맹판가 기준
             </p>
+            <FlowChips
+              payment="산방에프앤비 → 신화푸드 (전용 수수료 + 범용 공급대금)"
+              invoice="신화푸드 → 산방에프앤비"
+            />
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500">
@@ -1161,6 +1256,99 @@ export default function SettlementPage() {
             </div>
           </div>
         )}
+      </section>
+
+      {/* 6. 산방에프앤비 월간 손익 — 출고기준 P&L + 현금흐름 */}
+      <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <header className="px-5 py-4 border-b border-gray-200 flex items-baseline justify-between flex-wrap gap-3">
+          <div>
+            <h3 className="font-bold text-gray-900">6. 산방에프앤비 월간 손익</h3>
+            <p className="text-xs text-gray-500 mt-1">
+              출고기준 영업이익 + 현금흐름 참고 · 직영(상공회의소점)은 매출/매입에서 제외 (단, 직영분 신화 수수료는 산방에프앤비 부담으로 비용에 포함)
+            </p>
+          </div>
+          <span className="text-xs text-gray-500">{startDate} ~ {endDate}</span>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 lg:divide-x divide-gray-200">
+          {/* 좌: 영업이익 (P&L) */}
+          <div className="p-5">
+            <h4 className="text-xs font-semibold text-gray-600 mb-3">영업이익 (출고기준)</h4>
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between text-gray-700">
+                <dt>가맹점 매출 <span className="text-xs text-gray-400">(직영 제외)</span></dt>
+                <dd className="font-medium">₩{storeRevenue.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between text-gray-700">
+                <dt>B2B 매출</dt>
+                <dd className="font-medium">₩{b2bRevenue.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between border-t border-gray-200 pt-2 text-gray-900 font-semibold">
+                <dt>총 매출</dt>
+                <dd>₩{pnlRevenue.toLocaleString()}</dd>
+              </div>
+
+              <div className="flex justify-between text-gray-700 pt-3">
+                <dt>전용 매입원가 <span className="text-xs text-gray-400">(산방푸드 판매가)</span></dt>
+                <dd className="font-medium text-rose-600">-₩{exclusiveCogs.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between text-gray-700">
+                <dt>신화 전용 배송수수료 <span className="text-xs text-gray-400">(직영 포함)</span></dt>
+                <dd className="font-medium text-rose-600">-₩{pnlShinwaExclusiveFee.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between text-gray-700">
+                <dt>신화 범용 공급대금 <span className="text-xs text-gray-400">(97%)</span></dt>
+                <dd className="font-medium text-rose-600">-₩{pnlGeneralSupply.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between border-t border-gray-200 pt-2 text-gray-900 font-semibold">
+                <dt>총 비용</dt>
+                <dd className="text-rose-600">-₩{pnlCosts.toLocaleString()}</dd>
+              </div>
+
+              <div className="flex justify-between border-t-2 border-gray-300 pt-3 mt-2 items-baseline">
+                <dt className="font-bold text-gray-900">영업이익</dt>
+                <dd className="text-right">
+                  <span className={`text-2xl font-bold ${pnlOperatingProfit >= 0 ? 'text-[#1B4332]' : 'text-rose-700'}`}>
+                    ₩{pnlOperatingProfit.toLocaleString()}
+                  </span>
+                  <span className="ml-2 text-xs text-gray-500">({pnlMargin.toFixed(1)}%)</span>
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          {/* 우: 현금흐름 */}
+          <div className="p-5 bg-gray-50/50">
+            <h4 className="text-xs font-semibold text-gray-600 mb-3">현금흐름 (참고)</h4>
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between text-gray-700">
+                <dt>가맹점 + B2B 입금 <span className="text-xs text-gray-400">(예치금 충전 등)</span></dt>
+                <dd className="font-medium text-emerald-700">+₩{cashIn.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between text-gray-700">
+                <dt>산방푸드 지급 <span className="text-xs text-gray-400">(2섹션, 입고기준)</span></dt>
+                <dd className="font-medium text-rose-600">-₩{cashOutSanbang.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between text-gray-700">
+                <dt>신화푸드 지급 <span className="text-xs text-gray-400">(5섹션 합계)</span></dt>
+                <dd className="font-medium text-rose-600">-₩{cashOutShinwa.toLocaleString()}</dd>
+              </div>
+              <div className="flex justify-between border-t-2 border-gray-300 pt-3 mt-2 items-baseline">
+                <dt className="font-bold text-gray-900">이달 현금 변동</dt>
+                <dd className="text-right">
+                  <span className={`text-2xl font-bold ${cashFlow >= 0 ? 'text-[#1B4332]' : 'text-rose-700'}`}>
+                    {cashFlow >= 0 ? '+' : ''}₩{cashFlow.toLocaleString()}
+                  </span>
+                </dd>
+              </div>
+            </dl>
+            <p className="text-[11px] text-gray-400 mt-3 leading-relaxed">
+              현금흐름은 입고시점/지급시점 기준이라 출고기준 영업이익과 다를 수 있음.
+              산방푸드 입고가 많은 달은 현금이 더 빠지지만 재고로 남아있어 손익에는 반영 안 됨.
+              직영점 후불(4섹션)은 산방푸드 ↔ 직영 직접 결제라 산방에프앤비 통장과 무관.
+            </p>
+          </div>
+        </div>
       </section>
 
       </>)}

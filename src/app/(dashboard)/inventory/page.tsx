@@ -17,6 +17,7 @@ interface InventoryItem {
     product_type: string;
     cost_price_with_tax: number;
     price_with_tax: number;
+    sanbang_food_sale_price_with_tax: number;
     pack_per_box: number;
     is_loose_pack_sellable: boolean;
   };
@@ -89,7 +90,7 @@ export default function InventoryPage() {
     // 기존 inventory 레코드 로드
     const { data: inv } = await supabase
       .from('inventory')
-      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, pack_per_box, is_loose_pack_sellable)')
+      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable)')
       .order('product_id');
     const existingItems = (inv as InventoryItem[]) || [];
     const existingProductIds = new Set(existingItems.map((i) => i.product_id));
@@ -97,13 +98,13 @@ export default function InventoryPage() {
     // 전용상품 중 inventory 레코드가 없는 상품도 표시 (재고 0)
     const { data: exclusiveProducts } = await supabase
       .from('products')
-      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, pack_per_box, is_loose_pack_sellable')
+      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable')
       .eq('product_type', 'exclusive')
       .eq('is_active', true);
 
     const missingItems: InventoryItem[] = (exclusiveProducts || [])
       .filter((p: { id: string }) => !existingProductIds.has(p.id))
-      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean }) => ({
+      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; sanbang_food_sale_price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean }) => ({
         id: `virtual-${p.id}`,
         product_id: p.id,
         quantity: 0,
@@ -116,6 +117,7 @@ export default function InventoryPage() {
           product_type: p.product_type,
           cost_price_with_tax: p.cost_price_with_tax,
           price_with_tax: p.price_with_tax,
+          sanbang_food_sale_price_with_tax: p.sanbang_food_sale_price_with_tax,
           pack_per_box: p.pack_per_box,
           is_loose_pack_sellable: p.is_loose_pack_sellable,
         },
@@ -272,6 +274,21 @@ export default function InventoryPage() {
     return true;
   });
 
+  // 재고 금액 = 산방푸드 판매가(=산방에프앤비 매입가) 기준
+  // 박스: quantity × sanbang_food_sale_price_with_tax
+  // 낱팩: loose_pack_qty × (sanbang_food_sale_price_with_tax / pack_per_box)
+  // (정산 4섹션 직영 후불 단가 로직과 동일)
+  const itemValue = (item: InventoryItem) => {
+    const sfsp = item.products?.sanbang_food_sale_price_with_tax || 0;
+    if (sfsp === 0) return { boxValue: 0, looseValue: 0, total: 0, packPrice: 0 };
+    const ppb = item.products?.pack_per_box || 1;
+    const packPrice = ppb > 1 ? Math.round(sfsp / ppb) : sfsp;
+    const boxValue = item.quantity * sfsp;
+    const looseValue = (item.loose_pack_qty || 0) * packPrice;
+    return { boxValue, looseValue, total: boxValue + looseValue, packPrice };
+  };
+  const totalInventoryValue = items.reduce((acc, i) => acc + itemValue(i).total, 0);
+
   if (loading) {
     return (
       <div className="flex justify-center py-12">
@@ -294,6 +311,17 @@ export default function InventoryPage() {
         )}
       </div>
 
+      {/* 총 재고 가치 — 산방푸드 판매가(=산방에프앤비 매입가) 기준 */}
+      {userRole === 'admin' && totalInventoryValue > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-4 flex items-baseline justify-between flex-wrap gap-2">
+          <div>
+            <p className="text-xs text-gray-500">총 재고 가치</p>
+            <p className="text-[11px] text-gray-400 mt-0.5">산방푸드 판매가 기준 (산방에프앤비 매입가 = 상공회의소점 매입가)</p>
+          </div>
+          <p className="text-2xl font-bold text-[#1B4332]">₩{totalInventoryValue.toLocaleString()}</p>
+        </div>
+      )}
+
       {/* 재고 현황 카드 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {items.map((item) => {
@@ -301,6 +329,8 @@ export default function InventoryPage() {
           const ppb = item.products?.pack_per_box || 1;
           const hasLoose = (item.loose_pack_qty || 0) > 0;
           const canTogglePack = userRole === 'admin' && ppb > 1;
+          const value = itemValue(item);
+          const showValue = userRole === 'admin' && value.total > 0;
           return (
             <div
               key={item.id}
@@ -333,6 +363,22 @@ export default function InventoryPage() {
                   이력 보기
                 </button>
               </div>
+
+              {/* 재고 가치 — 산방푸드 판매가 기준 */}
+              {showValue && (
+                <div className="mt-3 pt-3 border-t border-gray-100">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-xs text-gray-500">재고 가치</span>
+                    <span className="text-base font-bold text-gray-800">₩{value.total.toLocaleString()}</span>
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-0.5 flex items-center justify-between">
+                    <span>박스 ₩{item.products.sanbang_food_sale_price_with_tax.toLocaleString()}</span>
+                    {value.looseValue > 0 && (
+                      <span>낱팩 ₩{value.packPrice.toLocaleString()}</span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* 낱팩 / 가맹점 판매 토글 (박스 입수 > 1 인 상품만) */}
               {ppb > 1 && (
