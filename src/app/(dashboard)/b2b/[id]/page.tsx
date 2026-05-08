@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, use } from 'react';
+import { useCallback, useEffect, useMemo, useState, use } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
@@ -32,7 +32,7 @@ type OrderLog = {
 export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [order, setOrder] = useState<B2bOrder | null>(null);
   const [items, setItems] = useState<B2bOrderItem[]>([]);
@@ -41,10 +41,7 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => { load(); }, [id]);
-
-  async function load() {
-    setLoading(true);
+  const load = useCallback(async () => {
     const [oRes, iRes, lRes] = await Promise.all([
       supabase.from('b2b_orders').select('*, b2b_customers(name)').eq('id', id).single(),
       supabase.from('b2b_order_items').select('*').eq('order_id', id).order('created_at'),
@@ -54,7 +51,27 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
     setItems((iRes.data as B2bOrderItem[]) || []);
     setLogs((lRes.data as OrderLog[]) || []);
     setLoading(false);
-  }
+  }, [id, supabase]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadInitial() {
+      const [oRes, iRes, lRes] = await Promise.all([
+        supabase.from('b2b_orders').select('*, b2b_customers(name)').eq('id', id).single(),
+        supabase.from('b2b_order_items').select('*').eq('order_id', id).order('created_at'),
+        supabase.from('b2b_order_logs').select('*').eq('order_id', id).order('created_at'),
+      ]);
+      if (cancelled) return;
+      setOrder((oRes.data as B2bOrder) || null);
+      setItems((iRes.data as B2bOrderItem[]) || []);
+      setLogs((lRes.data as OrderLog[]) || []);
+      setLoading(false);
+    }
+
+    loadInitial();
+    return () => { cancelled = true; };
+  }, [id, supabase]);
 
   async function doAction(action: 'ship' | 'cancel') {
     const confirmMsg = action === 'ship'
@@ -110,6 +127,12 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
             {statusLabel[order.status]}
           </span>
         </div>
+        <button
+          onClick={() => window.open(`/b2b/statement/${order.id}`, '_blank')}
+          className="mt-3 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
+        >
+          거래명세서 출력
+        </button>
       </div>
 
       {/* 주문 정보 */}

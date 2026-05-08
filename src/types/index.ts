@@ -111,6 +111,7 @@ export interface B2bProduct {
   pack_per_box: number;
   b2b_price: number;
   b2b_price_with_tax: number;
+  available_units: B2bUnit[];
   is_b2b_eligible: boolean;
   is_tax_free: boolean;
 }
