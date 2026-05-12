@@ -131,8 +131,7 @@ export default function NoticesPage() {
                 )}
                 <h3 className="font-semibold text-gray-800">{notice.title}</h3>
               </div>
-              <p className="text-sm text-gray-500 line-clamp-2">{notice.content}</p>
-              <div className="flex items-center justify-between mt-2">
+              <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-400">
                   {new Date(notice.created_at).toLocaleDateString('ko-KR')}
                 </p>
