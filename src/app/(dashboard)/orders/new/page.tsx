@@ -33,7 +33,7 @@ interface CartItem {
   unit_price_with_tax: number;
 }
 
-const MIN_ORDER_AMOUNT = 150000;
+const DEFAULT_MIN_ORDER_AMOUNT = 150000;
 
 const storageLabel: Record<string, string> = {
   frozen: '냉동',
@@ -68,10 +68,13 @@ export default function NewOrderPage() {
   const [loosePack, setLoosePack] = useState<Record<string, number>>({});
   // 동일옥: 주문 전체의 배송일을 점주가 선택
   const [chosenShipDate, setChosenShipDate] = useState<string>('');
+  // 매장 화이트리스트: null이면 전체 발주 가능, Set이면 해당 상품 ID만 발주 가능
+  const [allowedProductIds, setAllowedProductIds] = useState<Set<string> | null>(null);
   const JEJU_PALLET_MIN = 55;
   const supabase = createClient();
 
   const allowChooseShipDate = !!store?.allow_split_shipping;
+  const minOrderAmount = store?.min_order_amount ?? DEFAULT_MIN_ORDER_AMOUNT;
 
   // 이 매장의 가능 배송일 (동일옥용 드롭다운 옵션) — 가장 가까운 3개 노출
   const upcomingDates: string[] = store
@@ -105,6 +108,31 @@ export default function NewOrderPage() {
     const timer = setInterval(updateDeliveryInfo, 60000);
     return () => clearInterval(timer);
   }, [updateDeliveryInfo]);
+
+  // 매장 변경 시 화이트리스트 로드
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAllowed() {
+      if (!store) {
+        setAllowedProductIds(null);
+        return;
+      }
+      const { data } = await supabase
+        .from('store_allowed_products')
+        .select('product_id')
+        .eq('store_id', store.id);
+      if (cancelled) return;
+      if (!data || data.length === 0) {
+        setAllowedProductIds(null);
+      } else {
+        setAllowedProductIds(new Set(data.map((r: { product_id: string }) => r.product_id)));
+      }
+    }
+    loadAllowed();
+    return () => {
+      cancelled = true;
+    };
+  }, [store?.id, supabase]);
 
   useEffect(() => {
     async function loadJejuPallet() {
@@ -208,6 +236,7 @@ export default function NewOrderPage() {
   }
 
   const filteredProducts = products.filter((p) => {
+    if (allowedProductIds && !allowedProductIds.has(p.id)) return false;
     const matchType = filter === 'all' || p.product_type === filter;
     const matchSearch = !search || p.name.toLowerCase().includes(search.toLowerCase());
     return matchType && matchSearch;
@@ -256,8 +285,8 @@ export default function NewOrderPage() {
       setResult({ success: false, message: '상품을 선택해주세요.', amount: 0 });
       return;
     }
-    if (totalAmount < MIN_ORDER_AMOUNT) {
-      setResult({ success: false, message: `최소발주금액은 ₩${MIN_ORDER_AMOUNT.toLocaleString()}입니다.`, amount: 0 });
+    if (totalAmount < minOrderAmount) {
+      setResult({ success: false, message: `최소발주금액은 ₩${minOrderAmount.toLocaleString()}입니다.`, amount: 0 });
       return;
     }
     if (allowChooseShipDate && !chosenShipDate) {
@@ -338,7 +367,7 @@ export default function NewOrderPage() {
 
   const submitDisabled =
     submitting ||
-    totalAmount < MIN_ORDER_AMOUNT ||
+    totalAmount < minOrderAmount ||
     (allowChooseShipDate && !chosenShipDate) ||
     (!store?.is_direct && !!store && store.deposit_balance < totalAmount);
 
@@ -518,6 +547,16 @@ export default function NewOrderPage() {
               style={{ width: `${Math.min(100, (jejuPalletBoxes / JEJU_PALLET_MIN) * 100)}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {/* 매장 화이트리스트 안내 */}
+      {store && allowedProductIds && (
+        <div className="rounded-xl p-4 shadow-sm border border-amber-200 bg-amber-50 text-amber-900 text-sm">
+          <p className="font-bold">이 매장은 주문 가능 상품이 제한되어 있습니다.</p>
+          <p className="mt-1 text-xs">
+            아래 목록에 표시된 상품({allowedProductIds.size}종)만 발주할 수 있어요.
+          </p>
         </div>
       )}
 
@@ -888,8 +927,8 @@ export default function NewOrderPage() {
               >
                 {submitting
                   ? '처리 중...'
-                  : totalAmount < MIN_ORDER_AMOUNT
-                    ? `₩${MIN_ORDER_AMOUNT.toLocaleString()} 이상`
+                  : totalAmount < minOrderAmount
+                    ? `₩${minOrderAmount.toLocaleString()} 이상`
                     : allowChooseShipDate && !chosenShipDate
                       ? '배송일 선택 필요'
                       : !store?.is_direct && !!store && store.deposit_balance < totalAmount

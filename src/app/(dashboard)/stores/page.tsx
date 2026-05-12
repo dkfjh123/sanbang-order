@@ -10,11 +10,25 @@ export default function StoresPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showStoreModal, setShowStoreModal] = useState(false);
   const [prefillStoreId, setPrefillStoreId] = useState<string>('');
+  const [role, setRole] = useState<'admin' | 'store' | 'shinwa' | null>(null);
   const supabase = createClient();
 
   useEffect(() => {
-    loadStores();
+    init();
   }, []);
+
+  async function init() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: prof } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single();
+      if (prof) setRole(prof.role as 'admin' | 'store' | 'shinwa');
+    }
+    await loadStores();
+  }
 
   async function loadStores() {
     const { data } = await supabase
@@ -24,6 +38,8 @@ export default function StoresPage() {
     setStores((data as Store[]) || []);
     setLoading(false);
   }
+
+  const isAdmin = role === 'admin';
 
   if (loading) {
     return (
@@ -37,23 +53,25 @@ export default function StoresPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800">가맹점 관리</h2>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setShowStoreModal(true)}
-            className="px-4 py-2 border border-primary text-primary rounded-lg text-sm font-medium hover:bg-primary/5 transition"
-          >
-            + 신규 가맹점
-          </button>
-          <button
-            onClick={() => {
-              setPrefillStoreId('');
-              setShowCreateModal(true);
-            }}
-            className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition"
-          >
-            + 계정 생성
-          </button>
-        </div>
+        {isAdmin && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowStoreModal(true)}
+              className="px-4 py-2 border border-primary text-primary rounded-lg text-sm font-medium hover:bg-primary/5 transition"
+            >
+              + 신규 가맹점
+            </button>
+            <button
+              onClick={() => {
+                setPrefillStoreId('');
+                setShowCreateModal(true);
+              }}
+              className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition"
+            >
+              + 계정 생성
+            </button>
+          </div>
+        )}
       </div>
 
       {/* 가맹점 목록 테이블 */}
@@ -82,6 +100,11 @@ export default function StoresPage() {
                     : `₩${store.deposit_balance.toLocaleString()}`}
                 </span>
               </div>
+              {store.notes && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1 mt-2 whitespace-pre-line">
+                  📝 {store.notes}
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -105,7 +128,14 @@ export default function StoresPage() {
               {stores.map((store, idx) => (
                 <tr key={store.id} className="hover:bg-gray-50 transition">
                   <td className="px-4 py-3 text-gray-400">{idx + 1}</td>
-                  <td className="px-4 py-3 font-medium text-gray-800">{store.short_name || store.name}</td>
+                  <td className="px-4 py-3 font-medium text-gray-800">
+                    <div>{store.short_name || store.name}</div>
+                    {store.notes && (
+                      <div className="mt-1 text-xs text-amber-700 font-normal whitespace-pre-line">
+                        📝 {store.notes}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${
                       store.is_direct
@@ -139,8 +169,8 @@ export default function StoresPage() {
         )}
       </div>
 
-      {/* 신규 가맹점 등록 모달 */}
-      {showStoreModal && (
+      {/* 신규 가맹점 등록 모달 (관리자만) */}
+      {isAdmin && showStoreModal && (
         <CreateStoreModal
           onClose={() => setShowStoreModal(false)}
           onCreated={async (newStoreId) => {
@@ -152,8 +182,8 @@ export default function StoresPage() {
         />
       )}
 
-      {/* 계정 생성 모달 */}
-      {showCreateModal && (
+      {/* 계정 생성 모달 (관리자만) */}
+      {isAdmin && showCreateModal && (
         <CreateUserModal
           stores={stores}
           prefillStoreId={prefillStoreId}
@@ -189,6 +219,7 @@ function CreateStoreModal({
     phone: '',
     region: 'jeju' as 'jeju' | 'seoul',
     is_direct: false,
+    notes: '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -203,6 +234,7 @@ function CreateStoreModal({
       corporate_number: form.corporate_number || null,
       email: form.email || null,
       phone: form.phone || null,
+      notes: form.notes || null,
       short_name: form.short_name || form.name,
       deposit_balance: 0,
     };
@@ -373,6 +405,17 @@ function CreateStoreModal({
                 직영점 (후불정산)
               </label>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">운영 메모</label>
+            <textarea
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              rows={2}
+              placeholder="출입 비번 등 (관리자·신화푸드 조회용)"
+              className={`${input} resize-none`}
+            />
           </div>
 
           {error && (

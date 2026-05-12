@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import PasswordConfirmModal from '@/components/PasswordConfirmModal';
 
@@ -52,6 +52,8 @@ function monthRange(year: number, month: number) {
 export default function InventoryPage() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [transactions, setTransactions] = useState<InventoryTx[]>([]);
+  // 잔량 계산용 — 필터 시작일 이후 모든 트랜잭션 (표시 범위 밖도 포함)
+  const [txsForBalance, setTxsForBalance] = useState<InventoryTx[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState('');
@@ -128,6 +130,7 @@ export default function InventoryPage() {
   }
 
   // 입출고 이력 조회 (기간 기준 KR 자정, 타입은 client-side 필터)
+  // 잔량 계산용으로 필터 종료일 이후 트랜잭션도 함께 로드 (표시는 기간 내만).
   async function loadTransactions(start: string, end: string) {
     setTxLoading(true);
     // KR 자정 기준 [start, end+1) — UTC 산술로 다음날 계산하고 +09:00 timezone 명시
@@ -141,9 +144,11 @@ export default function InventoryPage() {
       .from('inventory_transactions')
       .select('*')
       .gte('created_at', startKR)
-      .lt('created_at', endNextKR)
       .order('created_at', { ascending: false });
-    setTransactions((txs as InventoryTx[]) || []);
+    const all = (txs as InventoryTx[]) || [];
+    setTxsForBalance(all);
+    // 표시: 기간 내(end 다음 자정 이전)만
+    setTransactions(all.filter((tx) => tx.created_at < endNextKR));
     setTxLoading(false);
   }
 
@@ -273,6 +278,39 @@ export default function InventoryPage() {
     if (txTypeFilter !== 'all' && tx.type !== txTypeFilter) return false;
     return true;
   });
+
+  // 각 트랜잭션 직후의 박스/팩 재고 잔량 계산
+  // - 현재 inventory.quantity / loose_pack_qty 부터 트랜잭션을 시간 역순으로 되돌려가며 계산
+  // - txsForBalance에는 화면에 표시되지 않는(필터 종료일 이후) 트랜잭션도 포함되어
+  //   과거 시점 잔량을 정확히 산출할 수 있음
+  const balanceAfterMap = useMemo(() => {
+    const map = new Map<string, { box: number; pack: number }>();
+    const byProduct: Record<string, InventoryTx[]> = {};
+    for (const tx of txsForBalance) {
+      (byProduct[tx.product_id] ||= []).push(tx);
+    }
+    for (const item of items) {
+      const list = byProduct[item.product_id] || [];
+      let boxBal = item.quantity;
+      let packBal = item.loose_pack_qty || 0;
+      for (const tx of list) {
+        // 이 트랜잭션 직후의 잔량 = 현재까지 누적된 boxBal/packBal
+        map.set(tx.id, { box: boxBal, pack: packBal });
+        // 이전 시점 잔량으로 되돌리기
+        const absQty = Math.abs(tx.quantity);
+        const delta =
+          tx.type === 'inbound' ? absQty
+          : tx.type === 'outbound' ? -absQty
+          : tx.quantity;
+        if ((tx.unit || 'box') === 'pack') {
+          packBal -= delta;
+        } else {
+          boxBal -= delta;
+        }
+      }
+    }
+    return map;
+  }, [txsForBalance, items]);
 
   // 재고 금액 = 산방푸드 판매가(=산방에프앤비 매입가) 기준
   // 박스: quantity × sanbang_food_sale_price_with_tax
@@ -549,6 +587,18 @@ export default function InventoryPage() {
                     <p className="font-semibold text-gray-800">
                       {sign}{absQty} {unitLabel}
                     </p>
+                    {(() => {
+                      const bal = balanceAfterMap.get(tx.id);
+                      if (!bal) return null;
+                      const isPackTx = (tx.unit || 'box') === 'pack';
+                      const balVal = isPackTx ? bal.pack : bal.box;
+                      const balUnit = isPackTx ? '팩' : '박스';
+                      return (
+                        <p className="text-xs text-gray-500">
+                          잔량 {balVal}{balUnit}
+                        </p>
+                      );
+                    })()}
                     <p className="text-xs text-gray-400">
                       {new Date(tx.created_at).toLocaleDateString('ko-KR')}
                     </p>

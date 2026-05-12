@@ -3,7 +3,7 @@ import { createClient as createServerClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
 import { getStoreDeliverySchedule, toLocalISODate } from '@/lib/delivery-schedule';
 
-const MIN_ORDER_AMOUNT = 150000;
+const DEFAULT_MIN_ORDER_AMOUNT = 150000;
 
 type OrderItemInput = {
   product_id: string;
@@ -62,16 +62,34 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '가맹점을 찾을 수 없습니다.' }, { status: 400 });
   }
 
+  // 매장별 주문 가능 상품 화이트리스트 검증
+  // - 행 없음: 전체 상품 발주 가능 (기존 매장)
+  // - 행 있음: 그 상품만 발주 가능 (동래정 등 제한 매장)
+  const { data: allowedRows } = await adminSupabase
+    .from('store_allowed_products')
+    .select('product_id')
+    .eq('store_id', store_id);
+  if (allowedRows && allowedRows.length > 0) {
+    const allowedSet = new Set(allowedRows.map((r: { product_id: string }) => r.product_id));
+    const disallowed = items.find((it) => !allowedSet.has(it.product_id));
+    if (disallowed) {
+      return NextResponse.json({
+        error: `${disallowed.product_name}은(는) 이 매장에서 주문 가능한 상품이 아닙니다.`,
+      }, { status: 400 });
+    }
+  }
+
   // 총액 계산
   const totalAmount = items.reduce(
     (sum, item) => sum + item.unit_price_with_tax * item.quantity,
     0
   );
 
-  // 최소발주금액 (주문 총액 기준 — 동일옥도 동일)
-  if (totalAmount < MIN_ORDER_AMOUNT) {
+  // 최소발주금액 (주문 총액 기준 — 매장별 설정, 동일옥도 동일하게 적용)
+  const minOrderAmount = store.min_order_amount ?? DEFAULT_MIN_ORDER_AMOUNT;
+  if (totalAmount < minOrderAmount) {
     return NextResponse.json({
-      error: `최소발주금액은 ₩${MIN_ORDER_AMOUNT.toLocaleString()}입니다.`,
+      error: `최소발주금액은 ₩${minOrderAmount.toLocaleString()}입니다.`,
     }, { status: 400 });
   }
 

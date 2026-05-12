@@ -26,6 +26,14 @@ export interface Store {
   delivery_days: number[] | null;          // Date.getDay() 기준 배송요일. null=region 기본값
   allow_split_shipping: boolean;           // true면 아이템별 ship_date 분할 주문 가능 (동일옥)
   deadline_override_until: string | null;  // 관리자가 마감 연장한 경우 해당 시각까지 마감 무시
+  min_order_amount: number;                // 매장별 최소발주금액. 기본 150,000
+  notes: string | null;                    // 출입 비번 등 매장 운영 메모. 관리자·신화푸드 조회
+  created_at: string;
+}
+
+export interface StoreAllowedProduct {
+  store_id: string;
+  product_id: string;
   created_at: string;
 }
 
