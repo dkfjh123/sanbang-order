@@ -1,9 +1,58 @@
 import { createClient } from '@supabase/supabase-js';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
-import { isPastDeadlineForStore } from '@/lib/delivery-schedule';
+import { isPastDeadlineForShipDate } from '@/lib/delivery-schedule';
 
-// 주문 수정 (수량 변경)
+type Unit = 'box' | 'pack';
+
+type IncomingItem = {
+  product_id?: unknown;
+  quantity?: unknown;
+  unit?: unknown;
+};
+
+type ProductRow = {
+  id: string;
+  name: string;
+  product_type: 'exclusive' | 'general';
+  price: number;
+  price_with_tax: number;
+  is_tax_free: boolean;
+  pack_per_box: number;
+  is_loose_pack_sellable: boolean;
+  is_active: boolean;
+};
+
+type ExistingOrderItem = {
+  product_id: string;
+  product_name: string;
+  product_type: 'exclusive' | 'general';
+  unit_price: number;
+  unit_price_with_tax: number;
+  is_tax_free: boolean;
+  unit: Unit | null;
+  pack_per_box: number | null;
+};
+
+type AtomicOrderItem = {
+  product_id: string;
+  product_name: string;
+  product_type: 'exclusive' | 'general';
+  quantity: number;
+  unit_price: number;
+  unit_price_with_tax: number;
+  is_tax_free: boolean;
+  unit: Unit;
+  pack_per_box: number;
+};
+
+const itemKey = (productId: string, unit: Unit) => `${productId}|${unit}`;
+
+function normalizeUnit(unit: unknown): Unit {
+  return unit === 'pack' ? 'pack' : 'box';
+}
+
+// 주문 수정 (항목 추가/삭제/수량 변경)
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const serverSupabase = await createServerClient();
@@ -36,8 +85,16 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     .eq('id', user.id)
     .single();
 
+  if (!profile) {
+    return NextResponse.json({ error: '수정 권한이 없습니다.' }, { status: 403 });
+  }
+
   const isAdmin = profile?.role === 'admin';
   const isStore = profile?.role === 'store';
+
+  if (isStore && profile?.store_id !== order.store_id) {
+    return NextResponse.json({ error: '다른 가맹점 주문은 수정할 수 없습니다.' }, { status: 403 });
+  }
 
   // 상태별 수정 허용: pending은 모두, confirmed는 admin만, 그 외는 금지
   if (order.status === 'pending') {
@@ -62,7 +119,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       delivery_days: number[] | null;
       deadline_override_until: string | null;
     };
-    if (isPastDeadlineForStore(s)) {
+    if (isPastDeadlineForShipDate(s, order.ship_date)) {
       return NextResponse.json({ error: '발주 마감 후에는 수정할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
     }
   }
@@ -70,16 +127,9 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   const body = await request.json();
   const { items } = body;
 
-  if (!items || items.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return NextResponse.json({ error: '상품을 선택해주세요.' }, { status: 400 });
   }
-
-  // 새 총액 계산
-  const newTotal = items.reduce(
-    (sum: number, item: { unit_price_with_tax: number; quantity: number }) =>
-      sum + item.unit_price_with_tax * item.quantity,
-    0
-  );
 
   // 가맹점 정보
   const { data: store } = await adminSupabase
@@ -92,136 +142,126 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: '가맹점을 찾을 수 없습니다.' }, { status: 400 });
   }
 
-  // 예치금 차이 확인 (직영점 제외)
-  const diff = newTotal - order.total_amount;
-  if (!store.is_direct && store.deposit_balance < diff) {
-    return NextResponse.json({ error: '예치금이 부족합니다.' }, { status: 400 });
-  }
-
-  // 기존 항목 조회 (재고 조정용) — unit/pack_per_box 포함
-  const { data: oldItems } = await adminSupabase
-    .from('order_items')
-    .select('product_id, quantity, unit, pack_per_box')
-    .eq('order_id', id);
-
-  // 기존 항목 삭제 후 새로 삽입 (unit/pack_per_box 스냅샷 유지)
-  await adminSupabase.from('order_items').delete().eq('order_id', id);
-
-  type EditItemInput = {
-    product_id: string;
-    product_name: string;
-    product_type: string;
-    quantity: number;
-    unit_price: number;
-    unit_price_with_tax: number;
-    is_tax_free: boolean;
-    unit?: 'box' | 'pack';
-    pack_per_box?: number;
-  };
-
-  const orderItems = (items as EditItemInput[]).map((item) => ({
-    order_id: id,
-    product_id: item.product_id,
-    product_name: item.product_name,
-    product_type: item.product_type,
-    quantity: item.quantity,
-    unit_price: item.unit_price,
-    unit_price_with_tax: item.unit_price_with_tax,
-    is_tax_free: item.is_tax_free,
-    subtotal: item.unit_price_with_tax * item.quantity,
-    unit: item.unit || 'box',
-    pack_per_box: item.pack_per_box || 1,
-  }));
-
-  await adminSupabase.from('order_items').insert(orderItems);
-
-  // 주문 총액 업데이트
-  await adminSupabase.from('orders').update({ total_amount: newTotal }).eq('id', id);
-
-  // 재고 조정: (product_id, unit) 키로 묶어서 delta 계산
-  //  - 박스 delta: 기존 직접 경로 유지
-  //  - 팩 delta: apply_b2b_inventory_delta RPC 재사용
-  if (oldItems) {
-    const oldQtyMap: Record<string, number> = {};
-    for (const oi of oldItems as Array<{ product_id: string; quantity: number; unit: 'box' | 'pack' | null }>) {
-      const key = `${oi.product_id}|${oi.unit || 'box'}`;
-      oldQtyMap[key] = (oldQtyMap[key] || 0) + oi.quantity;
+  const normalized = new Map<string, { product_id: string; unit: Unit; quantity: number }>();
+  for (const raw of items as IncomingItem[]) {
+    if (typeof raw.product_id !== 'string' || !raw.product_id) {
+      return NextResponse.json({ error: '상품 정보가 올바르지 않습니다.' }, { status: 400 });
     }
-    const newQtyMap: Record<string, number> = {};
-    for (const ni of items as EditItemInput[]) {
-      const key = `${ni.product_id}|${ni.unit || 'box'}`;
-      newQtyMap[key] = (newQtyMap[key] || 0) + ni.quantity;
+    const quantity = Number(raw.quantity);
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      return NextResponse.json({ error: '상품 수량은 1개 이상이어야 합니다.' }, { status: 400 });
     }
-
-    const allKeys = [...new Set([...Object.keys(oldQtyMap), ...Object.keys(newQtyMap)])];
-
-    for (const key of allKeys) {
-      const [productId, unit] = key.split('|') as [string, 'box' | 'pack'];
-      const oldQty = oldQtyMap[key] || 0;
-      const newQty = newQtyMap[key] || 0;
-      const qtyDiff = newQty - oldQty; // 양수: 추가 차감 필요, 음수: 복구 필요
-
-      if (qtyDiff === 0) continue;
-
-      if (unit === 'box') {
-        const { data: inv } = await adminSupabase
-          .from('inventory')
-          .select('quantity')
-          .eq('product_id', productId)
-          .single();
-
-        if (inv) {
-          const updatedQty = inv.quantity - qtyDiff;
-          if (updatedQty < 0) {
-            return NextResponse.json({ error: '재고가 부족하여 수량을 변경할 수 없습니다.' }, { status: 400 });
-          }
-          await adminSupabase
-            .from('inventory')
-            .update({ quantity: updatedQty })
-            .eq('product_id', productId);
-
-          await adminSupabase
-            .from('inventory_transactions')
-            .insert({
-              product_id: productId,
-              type: qtyDiff > 0 ? 'outbound' : 'inbound',
-              quantity: -qtyDiff,
-              description: `발주 수정 (${order.order_number}) - ${qtyDiff > 0 ? '추가 출고' : '수량 감소 복구'}`,
-              created_by: user.id,
-            });
-        }
-      } else {
-        // 팩 델타: RPC 로 처리. qtyDiff>0 → 양수 델타(추가 차감), qtyDiff<0 → 음수 델타(복구)
-        const { error: rpcError } = await adminSupabase.rpc('apply_b2b_inventory_delta', {
-          p_product_id: productId,
-          p_unit: 'pack',
-          p_delta: qtyDiff,
-          p_description: `발주 수정 (${order.order_number}) · 낱팩 ${qtyDiff > 0 ? '추가' : '감소'}`,
-          p_actor: user.id,
-        });
-        if (rpcError) {
-          return NextResponse.json({ error: `낱팩 재고 조정 실패: ${rpcError.message}` }, { status: 400 });
-        }
-      }
-    }
-  }
-
-  // 예치금 차이 반영 (직영점 제외)
-  if (!store.is_direct && diff !== 0) {
-    const newBalance = store.deposit_balance - diff;
-    await adminSupabase.from('stores').update({ deposit_balance: newBalance }).eq('id', store.id);
-    await adminSupabase.from('deposit_transactions').insert({
-      store_id: store.id,
-      type: 'adjustment',
-      amount: -diff,
-      balance_after: newBalance,
-      description: `발주 수정 (${order.order_number})`,
-      order_id: id,
-      created_by: user.id,
+    const unit = normalizeUnit(raw.unit);
+    const key = itemKey(raw.product_id, unit);
+    const existing = normalized.get(key);
+    normalized.set(key, {
+      product_id: raw.product_id,
+      unit,
+      quantity: (existing?.quantity || 0) + quantity,
     });
   }
 
-  return NextResponse.json({ success: true });
+  // 기존 주문에 있던 상품은 당시 단가/상품명 스냅샷을 유지한다.
+  const { data: oldItems, error: oldItemsError } = await adminSupabase
+    .from('order_items')
+    .select('product_id, product_name, product_type, unit_price, unit_price_with_tax, is_tax_free, unit, pack_per_box')
+    .eq('order_id', id);
+
+  if (oldItemsError) {
+    return NextResponse.json({ error: oldItemsError.message }, { status: 400 });
+  }
+
+  const oldByKey = new Map<string, ExistingOrderItem>();
+  for (const item of (oldItems || []) as ExistingOrderItem[]) {
+    if (!item.product_id) continue;
+    oldByKey.set(itemKey(item.product_id, item.unit || 'box'), item);
+  }
+
+  const productIds = [...new Set([...normalized.values()].map((item) => item.product_id))];
+  const { data: products, error: productsError } = await adminSupabase
+    .from('products')
+    .select('id, name, product_type, price, price_with_tax, is_tax_free, pack_per_box, is_loose_pack_sellable, is_active')
+    .in('id', productIds);
+
+  if (productsError) {
+    return NextResponse.json({ error: productsError.message }, { status: 400 });
+  }
+
+  const productById = new Map((products || []).map((product) => [product.id, product as ProductRow]));
+
+  // 매장별 주문 가능 상품 화이트리스트 검증. 목록이 비어 있으면 전체 허용.
+  const { data: allowedRows } = await adminSupabase
+    .from('store_allowed_products')
+    .select('product_id')
+    .eq('store_id', order.store_id);
+  const allowedSet =
+    allowedRows && allowedRows.length > 0
+      ? new Set(allowedRows.map((row: { product_id: string }) => row.product_id))
+      : null;
+
+  const atomicItems: AtomicOrderItem[] = [];
+  for (const item of normalized.values()) {
+    if (allowedSet && !allowedSet.has(item.product_id)) {
+      const productName = productById.get(item.product_id)?.name || '선택한 상품';
+      return NextResponse.json({
+        error: `${productName}은(는) 이 매장에서 주문 가능한 상품이 아닙니다.`,
+      }, { status: 400 });
+    }
+
+    const old = oldByKey.get(itemKey(item.product_id, item.unit));
+    if (old) {
+      atomicItems.push({
+        product_id: old.product_id,
+        product_name: old.product_name,
+        product_type: old.product_type,
+        quantity: item.quantity,
+        unit_price: old.unit_price,
+        unit_price_with_tax: old.unit_price_with_tax,
+        is_tax_free: old.is_tax_free,
+        unit: old.unit || 'box',
+        pack_per_box: old.pack_per_box || 1,
+      });
+      continue;
+    }
+
+    const product = productById.get(item.product_id);
+    if (!product || !product.is_active) {
+      return NextResponse.json({ error: '판매 중인 상품만 추가할 수 있습니다.' }, { status: 400 });
+    }
+    if (item.unit === 'pack' && !product.is_loose_pack_sellable) {
+      return NextResponse.json({ error: `${product.name}은(는) 낱팩 주문이 불가능한 상품입니다.` }, { status: 400 });
+    }
+
+    const packPerBox = product.pack_per_box || 1;
+    atomicItems.push({
+      product_id: product.id,
+      product_name: item.unit === 'pack' ? `${product.name} (낱팩)` : product.name,
+      product_type: product.product_type,
+      quantity: item.quantity,
+      unit_price: item.unit === 'pack' ? Math.round(product.price / packPerBox) : product.price,
+      unit_price_with_tax: item.unit === 'pack'
+        ? Math.round(product.price_with_tax / packPerBox)
+        : product.price_with_tax,
+      is_tax_free: product.is_tax_free,
+      unit: item.unit,
+      pack_per_box: packPerBox,
+    });
+  }
+
+  const { data: editResult, error: editError } = await adminSupabase.rpc(
+    'update_store_order_items_atomic',
+    {
+      p_order_id: id,
+      p_items: atomicItems,
+      p_actor: user.id,
+    }
+  );
+
+  if (editError) {
+    return NextResponse.json({ error: editError.message }, { status: 400 });
+  }
+
+  return NextResponse.json({ success: true, result: editResult });
 }
 
 // 주문 취소
@@ -252,11 +292,19 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   // 권한 확인
   const { data: profile } = await adminSupabase
     .from('profiles')
-    .select('role')
+    .select('role, store_id')
     .eq('id', user.id)
     .single();
 
+  if (!profile) {
+    return NextResponse.json({ error: '취소 권한이 없습니다.' }, { status: 403 });
+  }
+
   const isAdmin = profile?.role === 'admin';
+
+  if (profile?.role === 'store' && profile.store_id !== order.store_id) {
+    return NextResponse.json({ error: '다른 가맹점 주문은 취소할 수 없습니다.' }, { status: 403 });
+  }
 
   // 상태별 취소 허용: pending은 모두, confirmed는 admin만, 그 외는 금지
   if (order.status === 'pending') {
@@ -281,7 +329,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
       delivery_days: number[] | null;
       deadline_override_until: string | null;
     };
-    if (isPastDeadlineForStore(s)) {
+    if (isPastDeadlineForShipDate(s, order.ship_date)) {
       return NextResponse.json({ error: '발주 마감 후에는 취소할 수 없습니다. 관리자에게 문의하세요.' }, { status: 400 });
     }
   }

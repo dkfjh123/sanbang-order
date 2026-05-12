@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { isPastDeadlineForStore } from '@/lib/delivery-schedule';
+import { isPastDeadlineForShipDate } from '@/lib/delivery-schedule';
 import type { Profile } from '@/types';
 
 interface Order {
@@ -31,11 +31,28 @@ interface OrderItem {
   product_name: string;
   product_type: string;
   quantity: number;
+  unit_price: number;
   unit_price_with_tax: number;
+  is_tax_free: boolean;
   subtotal: number;
   unit?: 'box' | 'pack';
   pack_per_box?: number;
   ship_date?: string | null;
+}
+
+interface Product {
+  id: string;
+  name: string;
+  category: string;
+  product_type: 'exclusive' | 'general';
+  unit: string;
+  spec: string | null;
+  price: number;
+  price_with_tax: number;
+  is_tax_free: boolean;
+  storage: string | null;
+  pack_per_box: number;
+  is_loose_pack_sellable: boolean;
 }
 
 const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
@@ -62,6 +79,12 @@ const statusLabel: Record<string, { text: string; color: string }> = {
   cancelled: { text: '취소', color: 'bg-red-100 text-red-700' },
 };
 
+const storageLabel: Record<string, string> = {
+  frozen: '냉동',
+  refrigerated: '냉장',
+  room_temp: '상온',
+};
+
 export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -69,15 +92,35 @@ export default function OrdersPage() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [orderItems, setOrderItems] = useState<OrderItem[]>([]);
   const [orderLogs, setOrderLogs] = useState<OrderLog[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [inventory, setInventory] = useState<Record<string, number>>({});
+  const [loosePack, setLoosePack] = useState<Record<string, number>>({});
+  const [allowedProductIds, setAllowedProductIds] = useState<Set<string> | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [editItems, setEditItems] = useState<OrderItem[]>([]);
   const [editReason, setEditReason] = useState('');
+  const [editFilter, setEditFilter] = useState<'all' | 'exclusive' | 'general'>('all');
+  const [editSearch, setEditSearch] = useState('');
   const [cancelling, setCancelling] = useState(false);
   const [saving, setSaving] = useState(false);
   // 처리 대기 건이 가장 먼저 눈에 띄도록 기본 필터를 '대기'로 설정
   const [statusFilter, setStatusFilter] = useState<string>('pending');
   const [viewMode, setViewMode] = useState<'list' | 'store'>('list');
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
+
+  const refreshInventory = useCallback(async () => {
+    const { data: invData } = await supabase
+      .from('inventory')
+      .select('product_id, quantity, loose_pack_qty');
+    const invMap: Record<string, number> = {};
+    const looseMap: Record<string, number> = {};
+    (invData || []).forEach((i: { product_id: string; quantity: number; loose_pack_qty: number }) => {
+      invMap[i.product_id] = i.quantity;
+      looseMap[i.product_id] = i.loose_pack_qty || 0;
+    });
+    setInventory(invMap);
+    setLoosePack(looseMap);
+  }, [supabase]);
 
   useEffect(() => {
     async function load() {
@@ -90,31 +133,56 @@ export default function OrdersPage() {
         if (prof.role === 'shinwa') setViewMode('store');
       }
 
-      const { data } = await supabase
-        .from('orders')
-        .select('*, stores(short_name, name, region, delivery_days, allow_split_shipping, deadline_override_until)')
-        .order('created_at', { ascending: false });
+      const [{ data }, { data: prods }] = await Promise.all([
+        supabase
+          .from('orders')
+          .select('*, stores(short_name, name, region, delivery_days, allow_split_shipping, deadline_override_until)')
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('products')
+          .select('*')
+          .eq('is_active', true)
+          .order('sort_order'),
+      ]);
 
       setOrders((data as Order[]) || []);
+      setProducts((prods as Product[]) || []);
+      await refreshInventory();
       setLoading(false);
     }
     load();
-  }, []);
+  }, [refreshInventory, supabase]);
 
   const loadOrderDetail = async (order: Order) => {
     setSelectedOrder(order);
     setEditMode(false);
     setEditReason('');
-    const { data: items } = await supabase.from('order_items').select('*').eq('order_id', order.id);
-    setOrderItems((items as OrderItem[]) || []);
-    setEditItems((items as OrderItem[]) || []);
+    setEditFilter('all');
+    setEditSearch('');
 
-    const { data: logs } = await supabase
-      .from('order_logs')
-      .select('*')
-      .eq('order_id', order.id)
-      .order('created_at', { ascending: false });
+    const [{ data: items }, { data: logs }, { data: allowedRows }] = await Promise.all([
+      supabase.from('order_items').select('*').eq('order_id', order.id),
+      supabase
+        .from('order_logs')
+        .select('*')
+        .eq('order_id', order.id)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('store_allowed_products')
+        .select('product_id')
+        .eq('store_id', order.store_id),
+    ]);
+
+    const nextItems = (items as OrderItem[]) || [];
+    setOrderItems(nextItems);
+    setEditItems(nextItems);
+    setAllowedProductIds(
+      allowedRows && allowedRows.length > 0
+        ? new Set(allowedRows.map((row: { product_id: string }) => row.product_id))
+        : null
+    );
     setOrderLogs((logs as OrderLog[]) || []);
+    await refreshInventory();
   };
 
   const refreshOrders = async () => {
@@ -184,8 +252,85 @@ export default function OrdersPage() {
     ));
   };
 
+  const removeEditItem = (itemId: string) => {
+    setEditItems((prev) => prev.filter((item) => item.id !== itemId));
+  };
+
+  const getOriginalQty = (productId: string, unit: 'box' | 'pack') =>
+    orderItems
+      .filter((item) => item.product_id === productId && (item.unit || 'box') === unit)
+      .reduce((sum, item) => sum + item.quantity, 0);
+
+  const getEditQty = (productId: string, unit: 'box' | 'pack') =>
+    editItems
+      .filter((item) => item.product_id === productId && (item.unit || 'box') === unit)
+      .reduce((sum, item) => sum + item.quantity, 0);
+
+  const getEditableMaxQty = (product: Product, unit: 'box' | 'pack') => {
+    const originalQty = getOriginalQty(product.id, unit);
+    if (unit === 'box') {
+      const stock = product.id in inventory
+        ? inventory[product.id]
+        : product.product_type === 'exclusive'
+          ? 0
+          : Infinity;
+      return stock === Infinity ? Infinity : originalQty + stock;
+    }
+    const packPerBox = product.pack_per_box || 1;
+    const availablePacks = (loosePack[product.id] || 0) + ((inventory[product.id] || 0) * packPerBox);
+    return originalQty + availablePacks;
+  };
+
+  const makeEditItem = (product: Product, unit: 'box' | 'pack', quantity: number): OrderItem => {
+    const packPerBox = product.pack_per_box || 1;
+    const unitPrice = unit === 'pack' ? Math.round(product.price / packPerBox) : product.price;
+    const unitPriceWithTax = unit === 'pack'
+      ? Math.round(product.price_with_tax / packPerBox)
+      : product.price_with_tax;
+    return {
+      id: `new-${product.id}-${unit}`,
+      product_id: product.id,
+      product_name: unit === 'pack' ? `${product.name} (낱팩)` : product.name,
+      product_type: product.product_type,
+      quantity,
+      unit_price: unitPrice,
+      unit_price_with_tax: unitPriceWithTax,
+      is_tax_free: product.is_tax_free,
+      subtotal: unitPriceWithTax * quantity,
+      unit,
+      pack_per_box: packPerBox,
+      ship_date: selectedOrder?.ship_date || null,
+    };
+  };
+
+  const addEditItem = (product: Product, unit: 'box' | 'pack') => {
+    const currentQty = getEditQty(product.id, unit);
+    const maxQty = getEditableMaxQty(product, unit);
+    if (currentQty >= maxQty) return;
+
+    setEditItems((prev) => {
+      const existing = prev.find((item) => item.product_id === product.id && (item.unit || 'box') === unit);
+      if (existing) {
+        return prev.map((item) =>
+          item.id === existing.id
+            ? {
+                ...item,
+                quantity: item.quantity + 1,
+                subtotal: item.unit_price_with_tax * (item.quantity + 1),
+              }
+            : item
+        );
+      }
+      return [...prev, makeEditItem(product, unit, 1)];
+    });
+  };
+
   const handleSaveEdit = async () => {
     if (!selectedOrder) return;
+    if (editItems.length === 0) {
+      alert('상품을 1개 이상 선택해주세요.');
+      return;
+    }
     if (!editReason.trim()) {
       alert('수정 사유를 입력해주세요.');
       return;
@@ -198,14 +343,8 @@ export default function OrdersPage() {
       body: JSON.stringify({
         items: editItems.map((item) => ({
           product_id: item.product_id,
-          product_name: item.product_name,
-          product_type: item.product_type,
           quantity: item.quantity,
-          unit_price: item.unit_price_with_tax,
-          unit_price_with_tax: item.unit_price_with_tax,
-          is_tax_free: false,
           unit: item.unit || 'box',
-          pack_per_box: item.pack_per_box || 1,
         })),
       }),
     });
@@ -216,8 +355,8 @@ export default function OrdersPage() {
       const newItems = editItems.map((i) => `${i.product_name}:${i.quantity}`).join(', ');
       await supabase.from('order_logs').insert({
         order_id: selectedOrder.id,
-        action: '수량 수정',
-        description: `${editReason || '수량 변경'} | 변경전: ${oldItems} → 변경후: ${newItems}`,
+        action: '주문 수정',
+        description: `${editReason || '주문 변경'} | 변경전: ${oldItems} → 변경후: ${newItems}`,
         changed_by: (await supabase.auth.getUser()).data.user?.id,
         changed_by_name: profile?.name,
         changed_by_role: profile?.role,
@@ -226,6 +365,7 @@ export default function OrdersPage() {
       setEditMode(false);
       setEditReason('');
       await refreshOrders();
+      await refreshInventory();
       const newTotal = editItems.reduce((sum, item) => sum + item.unit_price_with_tax * item.quantity, 0);
       loadOrderDetail({ ...selectedOrder, total_amount: newTotal });
     } else {
@@ -247,6 +387,13 @@ export default function OrdersPage() {
     const existing = groupedByStore.get(storeName) || [];
     existing.push(order);
     groupedByStore.set(storeName, existing);
+  });
+
+  const filteredEditProducts = products.filter((product) => {
+    if (allowedProductIds && !allowedProductIds.has(product.id)) return false;
+    if (editFilter !== 'all' && product.product_type !== editFilter) return false;
+    if (editSearch && !product.name.toLowerCase().includes(editSearch.toLowerCase())) return false;
+    return true;
   });
 
   if (loading) {
@@ -384,7 +531,7 @@ export default function OrdersPage() {
       {/* 주문 상세 모달 */}
       {selectedOrder && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => { if (!editMode) setSelectedOrder(null); }}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-800">{selectedOrder.order_number}</h3>
               <button onClick={() => setSelectedOrder(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
@@ -438,11 +585,11 @@ export default function OrdersPage() {
               // 가맹점: pending + 마감 전에만 수정/취소 가능 (store 기반 마감 + override 반영)
               const s = selectedOrder.stores;
               const isPastDeadline = s
-                ? isPastDeadlineForStore({
+                ? isPastDeadlineForShipDate({
                     region: s.region,
                     delivery_days: s.delivery_days,
                     deadline_override_until: s.deadline_override_until,
-                  })
+                  }, selectedOrder.ship_date)
                 : false;
               const canEdit =
                 isAdmin ||
@@ -452,7 +599,7 @@ export default function OrdersPage() {
                 <div className="flex gap-2 mb-4">
                   <button onClick={() => setEditMode(true)}
                     className="flex-1 py-2.5 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition">
-                    수량 수정
+                    주문 수정
                   </button>
                   <button onClick={() => handleCancelOrder(selectedOrder.id)} disabled={cancelling}
                     className="flex-1 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition disabled:opacity-50">
@@ -469,22 +616,146 @@ export default function OrdersPage() {
               {editMode ? (
                 <>
                   <div className="divide-y divide-gray-100">
-                    {editItems.map((item) => (
-                      <div key={item.id} className="py-3 flex items-center justify-between">
-                        <span className="text-sm text-gray-800 flex-1">{item.product_name}</span>
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => updateEditQty(item.id, item.quantity - 1)}
-                            className="w-8 h-8 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50">−</button>
-                          <span className="w-8 text-center text-sm font-bold text-[#1B4332]">{item.quantity}</span>
-                          <button onClick={() => updateEditQty(item.id, item.quantity + 1)}
-                            className="w-8 h-8 rounded border border-[#1B4332] bg-[#1B4332] text-white flex items-center justify-center hover:bg-[#2D6A4F]">+</button>
-                        </div>
-                        <span className="font-medium text-gray-800 text-sm w-24 text-right">
-                          ₩{(item.unit_price_with_tax * item.quantity).toLocaleString()}
-                        </span>
+                    {editItems.length === 0 ? (
+                      <div className="py-6 text-center text-sm text-red-600 bg-red-50 rounded-lg">
+                        상품을 1개 이상 추가해야 저장할 수 있습니다.
                       </div>
-                    ))}
+                    ) : editItems.map((item) => {
+                      const unit = item.unit || 'box';
+                      const product = products.find((p) => p.id === item.product_id);
+                      const maxQty = product ? getEditableMaxQty(product, unit) : item.quantity;
+                      const canIncrease = item.quantity < maxQty;
+                      return (
+                        <div key={item.id} className="py-3 flex items-center gap-3">
+                          <div className="flex-1 min-w-0">
+                            <span className="text-sm font-medium text-gray-800 block truncate">{item.product_name}</span>
+                            <span className="text-xs text-gray-400">
+                              {unit === 'pack' ? '낱팩' : '박스'} · ₩{item.unit_price_with_tax.toLocaleString()}
+                              {maxQty !== Infinity && product && (
+                                <> · 최대 {maxQty.toLocaleString()}</>
+                              )}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              onClick={() => updateEditQty(item.id, item.quantity - 1)}
+                              disabled={item.quantity <= 1}
+                              className="w-8 h-8 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50 disabled:opacity-30"
+                            >
+                              −
+                            </button>
+                            <span className="w-8 text-center text-sm font-bold text-[#1B4332]">{item.quantity}</span>
+                            <button
+                              onClick={() => updateEditQty(item.id, item.quantity + 1)}
+                              disabled={!canIncrease}
+                              className="w-8 h-8 rounded border border-[#1B4332] bg-[#1B4332] text-white flex items-center justify-center hover:bg-[#2D6A4F] disabled:opacity-30 disabled:cursor-not-allowed"
+                            >
+                              +
+                            </button>
+                            <button
+                              onClick={() => removeEditItem(item.id)}
+                              className="px-2 h-8 rounded border border-red-300 text-red-600 text-xs font-medium hover:bg-red-50"
+                            >
+                              삭제
+                            </button>
+                          </div>
+                          <span className="font-medium text-gray-800 text-sm w-24 text-right shrink-0">
+                            ₩{(item.unit_price_with_tax * item.quantity).toLocaleString()}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
+
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <div className="flex items-center justify-between gap-3">
+                      <h4 className="font-medium text-gray-700 text-sm">상품 추가</h4>
+                      {allowedProductIds && (
+                        <span className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1">
+                          이 가맹점 주문 가능 상품만 표시
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-2 flex flex-col sm:flex-row gap-2">
+                      <div className="flex gap-2">
+                        {([['all', '전체'], ['exclusive', '전용'], ['general', '범용']] as const).map(([key, label]) => (
+                          <button
+                            key={key}
+                            onClick={() => setEditFilter(key)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
+                              editFilter === key
+                                ? 'bg-[#1B4332] text-white'
+                                : 'bg-white text-gray-600 border border-gray-200'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="text"
+                        value={editSearch}
+                        onChange={(e) => setEditSearch(e.target.value)}
+                        placeholder="상품 검색..."
+                        className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
+                      />
+                    </div>
+
+                    <div className="mt-3 border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-72 overflow-y-auto">
+                      {filteredEditProducts.length === 0 ? (
+                        <div className="p-5 text-center text-sm text-gray-400">추가할 수 있는 상품이 없습니다.</div>
+                      ) : filteredEditProducts.map((product) => {
+                        const boxQty = getEditQty(product.id, 'box');
+                        const packQty = getEditQty(product.id, 'pack');
+                        const maxBoxQty = getEditableMaxQty(product, 'box');
+                        const maxPackQty = getEditableMaxQty(product, 'pack');
+                        const canAddBox = boxQty < maxBoxQty;
+                        const canAddPack = product.is_loose_pack_sellable && packQty < maxPackQty;
+                        return (
+                          <div key={product.id} className="p-3 flex items-center gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                                  product.product_type === 'exclusive'
+                                    ? 'bg-orange-100 text-orange-700'
+                                    : 'bg-blue-100 text-blue-700'
+                                }`}>
+                                  {product.product_type === 'exclusive' ? '전용' : '범용'}
+                                </span>
+                                <span className="text-xs text-gray-400">
+                                  {storageLabel[product.storage || ''] || ''}{product.spec ? ` · ${product.spec}` : ''}
+                                </span>
+                              </div>
+                              <p className="font-medium text-sm text-gray-800 truncate">{product.name}</p>
+                              <p className="text-xs text-gray-500">
+                                ₩{product.price_with_tax.toLocaleString()} / {product.unit}
+                                {product.is_tax_free && <span className="ml-1 text-green-600">(면세)</span>}
+                              </p>
+                            </div>
+                            <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+                              <button
+                                onClick={() => addEditItem(product, 'box')}
+                                disabled={!canAddBox}
+                                className="px-3 py-1.5 bg-[#1B4332] text-white rounded-lg text-xs font-medium hover:bg-[#2D6A4F] disabled:opacity-30 disabled:cursor-not-allowed"
+                              >
+                                박스 추가
+                              </button>
+                              {product.is_loose_pack_sellable && (
+                                <button
+                                  onClick={() => addEditItem(product, 'pack')}
+                                  disabled={!canAddPack}
+                                  className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-medium hover:bg-amber-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  낱팩 추가
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   <div className="flex justify-between pt-3 border-t border-gray-200 mt-2">
                     <span className="font-semibold text-gray-800">수정 합계</span>
                     <span className="font-bold text-lg text-[#1B4332]">

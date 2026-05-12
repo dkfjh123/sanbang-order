@@ -258,6 +258,37 @@ export function isPastDeadlineForStore(
 }
 
 /**
+ * 특정 주문의 ship_date 기준으로 마감이 지났는지 판정.
+ * 동일옥처럼 주문별 배송일을 고르는 매장은 "다음 배송일"이 아니라
+ * 해당 주문의 배송일 전일 마감을 기준으로 수정 가능 여부를 판단해야 한다.
+ */
+export function isPastDeadlineForShipDate(
+  store: StoreScheduleInput,
+  shipDate: string | null | undefined,
+  now?: Date
+): boolean {
+  if (!shipDate) return isPastDeadlineForStore(store, now);
+
+  const currentTime = now || new Date();
+  if (store.deadline_override_until) {
+    const overrideDate = new Date(store.deadline_override_until);
+    if (overrideDate.getTime() > currentTime.getTime()) return false;
+  }
+
+  const ship = new Date(`${shipDate}T00:00:00`);
+  if (Number.isNaN(ship.getTime())) return isPastDeadlineForStore(store, now);
+
+  const deadline = addDays(ship, -1);
+  if (store.region === 'jeju') {
+    deadline.setHours(16, 0, 0, 0);
+  } else {
+    deadline.setHours(17, 0, 0, 0);
+  }
+
+  return currentTime >= deadline;
+}
+
+/**
  * 특정 매장의 다음 N개 배송일을 반환 (분할 배송 UI 드롭다운용).
  * 이미 마감이 지난 배송일은 제외.
  */

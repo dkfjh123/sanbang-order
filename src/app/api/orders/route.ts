@@ -47,6 +47,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '발주 항목을 선택해주세요.' }, { status: 400 });
   }
 
+  if (profile.role === 'shinwa') {
+    return NextResponse.json({ error: '발주 권한이 없습니다.' }, { status: 403 });
+  }
+
+  if (profile.role === 'store' && profile.store_id !== store_id) {
+    return NextResponse.json({ error: '다른 가맹점으로 발주할 수 없습니다.' }, { status: 403 });
+  }
+
   const adminSupabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
