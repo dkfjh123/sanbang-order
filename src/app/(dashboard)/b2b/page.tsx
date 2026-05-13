@@ -25,11 +25,18 @@ export default function B2bOrdersPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<B2bOrderStatus | 'all'>('all');
   const [customerFilter, setCustomerFilter] = useState<string>('all');
+  const [role, setRole] = useState<'admin' | 'shinwa' | null>(null);
   const supabase = createClient();
 
   useEffect(() => { load(); }, []);
 
   async function load() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single();
+      const r = (prof?.role === 'shinwa' || prof?.role === 'admin') ? prof.role as 'admin' | 'shinwa' : null;
+      setRole(r);
+    }
     const [ordersRes, customersRes] = await Promise.all([
       supabase
         .from('b2b_orders')
@@ -62,21 +69,30 @@ export default function B2bOrdersPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <h2 className="text-xl font-bold text-gray-800">B2B 발주</h2>
-        <div className="flex gap-2">
-          <Link
-            href="/b2b/customers"
-            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
-          >
-            거래처 관리
-          </Link>
-          <Link
-            href="/b2b/new"
-            className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition"
-          >
-            + 발주 등록
-          </Link>
+        <div>
+          <h2 className="text-xl font-bold text-gray-800">
+            {role === 'shinwa' ? 'B2B 배송' : 'B2B 발주'}
+          </h2>
+          {role === 'shinwa' && (
+            <p className="text-xs text-gray-500 mt-1">대기 상태인 발주를 확인하고 출고 처리하세요.</p>
+          )}
         </div>
+        {role === 'admin' && (
+          <div className="flex gap-2">
+            <Link
+              href="/b2b/customers"
+              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
+            >
+              거래처 관리
+            </Link>
+            <Link
+              href="/b2b/new"
+              className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition"
+            >
+              + 발주 등록
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* 필터 */}

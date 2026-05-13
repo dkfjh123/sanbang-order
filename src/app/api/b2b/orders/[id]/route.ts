@@ -26,12 +26,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .eq('id', user.id)
     .single();
 
-  if (profile?.role !== 'admin') {
+  const role = profile?.role;
+  if (role !== 'admin' && role !== 'shinwa') {
     return NextResponse.json({ error: '권한이 없습니다.' }, { status: 403 });
   }
 
   const body = await request.json();
   const action = body.action as 'ship' | 'cancel' | 'update';
+
+  // shinwa 는 출고 처리(ship)만 가능 — 나머지(cancel/update)는 admin 전용
+  if (role === 'shinwa' && action !== 'ship') {
+    return NextResponse.json({ error: '신화푸드는 출고 처리만 가능합니다.' }, { status: 403 });
+  }
 
   const { data: order } = await adminSupabase
     .from('b2b_orders')
@@ -51,7 +57,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const logActor = {
     changed_by: user.id,
     changed_by_name: profile?.name || null,
-    changed_by_role: 'admin',
+    changed_by_role: role,
   };
 
   // ----------------------------------------------------------

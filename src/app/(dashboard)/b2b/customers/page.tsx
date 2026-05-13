@@ -56,6 +56,9 @@ export default function B2bCustomersPage() {
                 <div>
                   <div className="flex items-center gap-2">
                     <h3 className="font-semibold text-gray-800">{c.name}</h3>
+                    <span className={`px-2 py-0.5 text-xs rounded ${c.region === 'jeju' ? 'bg-amber-50 text-amber-700' : 'bg-sky-50 text-sky-700'}`}>
+                      {c.region === 'jeju' ? '제주 12.5%' : '육지 8.5%'}
+                    </span>
                     {!c.is_active && (
                       <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">비활성</span>
                     )}
@@ -113,6 +116,7 @@ function CustomerModal({
     contact_email: customer?.contact_email || '',
     address: customer?.address || '',
     memo: customer?.memo || '',
+    region: (customer?.region as 'jeju' | 'seoul') || 'seoul',
     is_active: customer?.is_active ?? true,
   });
   const [saving, setSaving] = useState(false);
@@ -131,6 +135,7 @@ function CustomerModal({
       contact_email: form.contact_email || null,
       address: form.address || null,
       memo: form.memo || null,
+      region: form.region,
       is_active: form.is_active,
     };
 
@@ -184,6 +189,18 @@ function CustomerModal({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">주소</label>
             <input type="text" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} className={input} />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">권역 *</label>
+            <select
+              value={form.region}
+              onChange={(e) => setForm({ ...form, region: e.target.value as 'jeju' | 'seoul' })}
+              className={input}
+            >
+              <option value="seoul">육지 (신화수수료 8.5%)</option>
+              <option value="jeju">제주 (신화수수료 12.5%)</option>
+            </select>
+            <p className="mt-1 text-xs text-gray-400">신화 물류수수료율 산정 기준. 수수료 베이스는 가맹점 판가입니다.</p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">메모</label>

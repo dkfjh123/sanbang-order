@@ -61,6 +61,8 @@ export interface MenuItem {
 }
 
 // B2B (아워홈 등 대기업 거래처) — 가맹점/예치금 시스템과 완전히 분리
+export type B2bRegion = 'jeju' | 'seoul';
+
 export interface B2bCustomer {
   id: string;
   name: string;
@@ -70,6 +72,7 @@ export interface B2bCustomer {
   contact_email: string | null;
   address: string | null;
   memo: string | null;
+  region: B2bRegion;
   is_active: boolean;
   created_at: string;
   updated_at: string;

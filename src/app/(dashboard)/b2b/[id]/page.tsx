@@ -37,6 +37,7 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
   const [order, setOrder] = useState<B2bOrder | null>(null);
   const [items, setItems] = useState<B2bOrderItem[]>([]);
   const [logs, setLogs] = useState<OrderLog[]>([]);
+  const [role, setRole] = useState<'admin' | 'shinwa' | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -57,6 +58,14 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
     let cancelled = false;
 
     async function loadInitial() {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single();
+        if (!cancelled) {
+          const r = (prof?.role === 'shinwa' || prof?.role === 'admin') ? prof.role as 'admin' | 'shinwa' : null;
+          setRole(r);
+        }
+      }
       const [oRes, iRes, lRes] = await Promise.all([
         supabase.from('b2b_orders').select('*, b2b_customers(name)').eq('id', id).single(),
         supabase.from('b2b_order_items').select('*').eq('order_id', id).order('created_at'),
@@ -210,7 +219,7 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
         </div>
       </div>
 
-      {/* 액션 버튼 */}
+      {/* 액션 버튼 — shinwa 는 출고만, admin 은 전체 */}
       {order.status !== 'cancelled' && (
         <div className="flex flex-wrap gap-2">
           {order.status === 'pending' && (
@@ -222,16 +231,18 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
               >
                 출고 처리 (재고 차감)
               </button>
-              <button
-                onClick={doDelete}
-                disabled={busy}
-                className="px-4 py-2 border border-red-300 text-red-600 rounded-lg text-sm font-medium hover:bg-red-50 transition disabled:opacity-50"
-              >
-                삭제
-              </button>
+              {role === 'admin' && (
+                <button
+                  onClick={doDelete}
+                  disabled={busy}
+                  className="px-4 py-2 border border-red-300 text-red-600 rounded-lg text-sm font-medium hover:bg-red-50 transition disabled:opacity-50"
+                >
+                  삭제
+                </button>
+              )}
             </>
           )}
-          {order.status === 'shipped' && (
+          {order.status === 'shipped' && role === 'admin' && (
             <button
               onClick={() => doAction('cancel')}
               disabled={busy}

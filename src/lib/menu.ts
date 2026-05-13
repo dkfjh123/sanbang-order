@@ -11,7 +11,7 @@ export const menuItems: MenuItem[] = [
   { label: '출고내역', href: '/shipments', roles: ['admin'] },
   { label: '정산관리', href: '/settlement', roles: ['admin'] },
   { label: '공지사항', href: '/notices', roles: ['admin', 'store', 'shinwa'] },
-  { label: 'B2B 발주', href: '/b2b', roles: ['admin'] },
+  { label: 'B2B 발주', href: '/b2b', roles: ['admin', 'shinwa'] },
 ];
 
 export function getMenuForRole(role: UserRole): MenuItem[] {

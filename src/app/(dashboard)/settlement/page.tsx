@@ -33,13 +33,13 @@ interface InboundTx {
   created_at: string;
 }
 
-// B2B 발주 — 신화푸드 정산 5섹션에 포함 (아워홈 = 육지)
+// B2B 발주 — 신화푸드 정산 5섹션에 포함 (거래처별 region 으로 수수료율 결정)
 interface B2bOrderRow {
   id: string;
   order_number: string;
   status: string;
   ship_date: string | null;
-  b2b_customers: { name: string } | null;
+  b2b_customers: { name: string; region: 'seoul' | 'jeju' } | null;
   b2b_order_items: {
     product_name: string;
     quantity: number;
@@ -54,6 +54,7 @@ interface ExclusiveProduct {
   name: string;
   sort_order: number;
   pack_per_box: number;          // 낱팩 발주 단가 분기 (4섹션)
+  price_with_tax: number;        // 가맹점 판가 (B2B 신화수수료 산정 기준)
   sanbang_food_sale_price_with_tax: number;
   cost_price_with_tax: number;   // 제조사 → 산방푸드 매입가 (3섹션)
 }
@@ -159,19 +160,19 @@ export default function SettlementPage() {
 
     setOrders((orderData as OrderWithItems[]) || []);
 
-    // B2B 출고 — 신화푸드 정산 5섹션 대상 (아워홈 = 육지 8.5%)
+    // B2B 출고 — 신화푸드 정산 5섹션 대상 (거래처별 region 기반)
     const { data: b2bData } = await supabase
       .from('b2b_orders')
-      .select('id, order_number, status, ship_date, b2b_customers(name), b2b_order_items(product_name, quantity, unit, unit_price_with_tax, subtotal)')
+      .select('id, order_number, status, ship_date, b2b_customers(name, region), b2b_order_items(product_name, quantity, unit, unit_price_with_tax, subtotal)')
       .in('status', ['confirmed', 'shipped'])
       .gte('ship_date', startDate)
       .lte('ship_date', endDate);
     setB2bOrders((b2bData as unknown as B2bOrderRow[]) || []);
 
-    // 전용상품 + 산방푸드 판매가 (2섹션) + 매입가 (3섹션) + pack_per_box (4섹션 낱팩 분기)
+    // 전용상품 — 5섹션(가맹판가, B2B 수수료 베이스) + 2섹션(산방푸드 판매가) + 3섹션(매입가) + 4섹션(낱팩 분기)
     const { data: prodData } = await supabase
       .from('products')
-      .select('id, name, sort_order, pack_per_box, sanbang_food_sale_price_with_tax, cost_price_with_tax')
+      .select('id, name, sort_order, pack_per_box, price_with_tax, sanbang_food_sale_price_with_tax, cost_price_with_tax')
       .eq('product_type', 'exclusive')
       .order('sort_order', { ascending: true });
     const exclusiveList = (prodData as ExclusiveProduct[]) || [];
@@ -397,7 +398,10 @@ export default function SettlementPage() {
   );
 
   // 5섹션 — 신화푸드 정산 (매장/거래처별)
-  //   전용 수수료: 모든 매장 + B2B (직영 상공회의소점도 신화 물류수수료 대상, 단가는 가맹판가 기준)
+  //   전용 수수료: 모든 매장 + B2B
+  //     - 가맹점/직영: item.subtotal(가맹판가) 자체가 수수료 베이스
+  //     - B2B: 매출(item.subtotal)은 B2B 가격이므로 별개. 수수료 베이스는 "가맹점 판가 × 수량"으로 재계산
+  //     - 거래처 region 으로 수수료율 결정 (제주 12.5% / 육지 8.5%)
   //   범용 공급대금: 모든 매장 (B2B는 전용만이라 범용 없음)
   type ShinwaRow = {
     party_id: string;
@@ -406,7 +410,8 @@ export default function SettlementPage() {
     region: 'seoul' | 'jeju';
     is_direct: boolean;
     feeRate: number;          // 전용 수수료율
-    exclusiveSales: number;   // 전용 매출 (가맹판가 또는 B2B 매출 기준)
+    exclusiveSales: number;   // 전용 매출 (가맹판가 또는 B2B 매출 기준 — 표시용)
+    exclusiveFeeBase: number; // 전용 수수료 산정 베이스 (항상 가맹점 판가 × 수량)
     exclusiveFee: number;     // 전용 수수료
     generalSales: number;     // 범용 매출 (orders만)
     generalSupply: number;    // 범용 공급대금
@@ -429,6 +434,7 @@ export default function SettlementPage() {
         is_direct: isDirect,
         feeRate: SHINWA_FEE_RATE[region],
         exclusiveSales: 0,
+        exclusiveFeeBase: 0,
         exclusiveFee: 0,
         generalSales: 0,
         generalSupply: 0,
@@ -438,18 +444,24 @@ export default function SettlementPage() {
     }
     order.order_items.forEach((item) => {
       if (item.product_type === 'exclusive') {
-        // 직영 포함 모든 매장 — 가맹판가 기준 신화 수수료
+        // 직영 포함 모든 매장 — 가맹판가 기준 신화 수수료 (매출 = 베이스)
         row!.exclusiveSales += item.subtotal;
+        row!.exclusiveFeeBase += item.subtotal;
       } else {
         row!.generalSales += item.subtotal;
       }
     });
   });
 
-  // (2) B2B — b2b_orders 기준 (아워홈 = 육지 8.5%, 모두 전용상품)
+  // (2) B2B — b2b_orders 기준
+  //   - region: 거래처 정보의 region (jeju 12.5% / seoul 8.5%)
+  //   - 수수료 베이스: 가맹점 판가(price_with_tax) × 수량 — B2B 가격과 무관
+  //     (B2B 가격이 가맹판가와 다르므로 매출은 매출대로 잡되 수수료는 가맹판가 기준)
+  //   - 박스/낱팩 분기: pack 발주는 가맹판가 ÷ pack_per_box 사용
+  const productByName = new Map(exclusiveProducts.map((p) => [p.name, p]));
   b2bOrders.forEach((order) => {
     const customerName = order.b2b_customers?.name || 'B2B 거래처';
-    // 같은 거래처는 통합 (거래처명을 키로)
+    const customerRegion = (order.b2b_customers?.region as 'seoul' | 'jeju') || 'seoul';
     const key = `b2b:${customerName}`;
     let row = shinwaMap.get(key);
     if (!row) {
@@ -457,10 +469,11 @@ export default function SettlementPage() {
         party_id: key,
         name: customerName,
         channel: 'b2b',
-        region: 'seoul', // 아워홈 = 육지 (향후 거래처별 region 필요 시 확장)
+        region: customerRegion,
         is_direct: false,
-        feeRate: SHINWA_FEE_RATE.seoul,
+        feeRate: SHINWA_FEE_RATE[customerRegion],
         exclusiveSales: 0,
+        exclusiveFeeBase: 0,
         exclusiveFee: 0,
         generalSales: 0,
         generalSupply: 0,
@@ -469,14 +482,22 @@ export default function SettlementPage() {
       shinwaMap.set(key, row);
     }
     order.b2b_order_items.forEach((item) => {
-      // B2B는 모두 전용상품으로 간주 (b2b 매출 기준)
       row!.exclusiveSales += item.subtotal;
+      // 신화수수료 베이스 = 가맹판가 × 수량 (가맹판가 정보 없으면 0 — 매핑 누락 방어)
+      const p = productByName.get(item.product_name);
+      if (p) {
+        const ppb = p.pack_per_box || 1;
+        const boxPrice = p.price_with_tax;
+        const packPrice = ppb > 1 ? Math.round(boxPrice / ppb) : boxPrice;
+        const unitPrice = item.unit === 'pack' ? packPrice : boxPrice;
+        row!.exclusiveFeeBase += item.quantity * unitPrice;
+      }
     });
   });
 
-  // 합계 계산 (round)
+  // 합계 계산 (round) — 수수료는 베이스 × 요율
   shinwaMap.forEach((r) => {
-    r.exclusiveFee = Math.round(r.exclusiveSales * r.feeRate);
+    r.exclusiveFee = Math.round(r.exclusiveFeeBase * r.feeRate);
     r.generalSupply = Math.round(r.generalSales * GENERAL_SUPPLY_RATE);
     r.storeTotal = r.exclusiveFee + r.generalSupply;
   });
@@ -506,8 +527,7 @@ export default function SettlementPage() {
   //   직영(상공회의소점) 정책:
   //     - 매출/매입 0 (산방에프앤비를 거치지 않음)
   //     - 단, 5섹션 직영분 신화 수수료는 산방에프앤비 부담 → 비용으로 잡힘
-  //   B2B는 product_id가 없어서 product_name 매핑으로 산방푸드 판매가 조회
-  const productByName = new Map(exclusiveProducts.map((p) => [p.name, p]));
+  //   B2B는 product_id가 없어서 product_name 매핑으로 산방푸드 판매가 조회 (5섹션에서 이미 선언된 productByName 재사용)
 
   // 출고기준 매출원가 — 전용상품
   let exclusiveCogs = 0;
@@ -688,7 +708,7 @@ export default function SettlementPage() {
   const downloadShinwaExcel = () => {
     const header = [
       '매장/거래처', '채널', '권역', '수수료율',
-      '전용 매출', '전용 수수료',
+      '전용 매출', '전용 수수료 베이스(가맹판가)', '전용 수수료',
       '범용 매출', '범용 공급대금(97%)',
       '신화 정산 합계',
     ];
@@ -698,21 +718,24 @@ export default function SettlementPage() {
       r.region === 'jeju' ? '제주' : '육지',
       `${(r.feeRate * 100).toFixed(1)}%`,
       String(r.exclusiveSales),
+      String(r.exclusiveFeeBase),
       String(r.exclusiveFee),
       String(r.generalSales),
       String(r.generalSupply),
       String(r.storeTotal),
     ]);
+    const shinwaTotalFeeBase = shinwaRows.reduce((s, r) => s + r.exclusiveFeeBase, 0);
     const totalRow = [
       '합계', '', '', '',
       String(shinwaTotal.exclusiveSales),
+      String(shinwaTotalFeeBase),
       String(shinwaTotal.exclusiveFee),
       String(shinwaTotal.generalSales),
       String(shinwaTotal.generalSupply),
       String(shinwaTotal.storeTotal),
     ];
-    const blank = ['', '', '', '', '', '', '', '', ''];
-    const marginRow = ['산방에프앤비 범용 마진(3%)', '', '', '', '', '', '', '', String(sanbangGeneralMargin)];
+    const blank = ['', '', '', '', '', '', '', '', '', ''];
+    const marginRow = ['산방에프앤비 범용 마진(3%)', '', '', '', '', '', '', '', '', String(sanbangGeneralMargin)];
     const rows: string[][] = [header, ...body, totalRow, blank, marginRow];
 
     const csv = '﻿' + rows
@@ -1197,6 +1220,11 @@ export default function SettlementPage() {
                   </td>
                   <td className="px-3 py-3 text-right">
                     {r.exclusiveFee > 0 ? `₩${r.exclusiveFee.toLocaleString()}` : <span className="text-gray-300">-</span>}
+                    {r.channel === 'b2b' && r.exclusiveFeeBase > 0 && r.exclusiveFeeBase !== r.exclusiveSales && (
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        수수료 기준 ₩{r.exclusiveFeeBase.toLocaleString()} (가맹판가)
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-3 text-right">
                     {r.generalSales > 0 ? `₩${r.generalSales.toLocaleString()}` : <span className="text-gray-300">-</span>}
@@ -1253,6 +1281,7 @@ export default function SettlementPage() {
               <span>전용 매출 ₩{shinwaTotal.exclusiveSales.toLocaleString()} (제주 12.5% / 육지 8.5% 적용)</span>
               <span>범용 매출 ₩{shinwaTotal.generalSales.toLocaleString()} × 97%</span>
               <span>참고: 산방에프앤비 범용 마진(3%) ₩{sanbangGeneralMargin.toLocaleString()}</span>
+              <span className="basis-full text-[11px] text-gray-400">B2B 신화수수료는 거래처 매출가가 아닌 "가맹점 판가" 기준으로 산정합니다.</span>
             </div>
           </div>
         )}
