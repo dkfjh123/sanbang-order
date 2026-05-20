@@ -9,6 +9,10 @@ interface InventoryItem {
   product_id: string;
   quantity: number;
   loose_pack_qty: number;
+  on_hand: number;
+  reserved: number;
+  on_hand_pack: number;
+  reserved_pack: number;
   products: {
     name: string;
     spec: string | null;
@@ -20,6 +24,7 @@ interface InventoryItem {
     sanbang_food_sale_price_with_tax: number;
     pack_per_box: number;
     is_loose_pack_sellable: boolean;
+    allow_unit_change: boolean;
   };
 }
 
@@ -73,6 +78,7 @@ export default function InventoryPage() {
   const [userRole, setUserRole] = useState<string>('');
   const [pendingToggle, setPendingToggle] = useState<{ productId: string; next: boolean } | null>(null);
   const [showTogglePasswordModal, setShowTogglePasswordModal] = useState(false);
+  const [showValueSection, setShowValueSection] = useState(false);
   const txSectionRef = useRef<HTMLDivElement>(null);
   const supabase = createClient();
 
@@ -92,7 +98,7 @@ export default function InventoryPage() {
     // 기존 inventory 레코드 로드
     const { data: inv } = await supabase
       .from('inventory')
-      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable)')
+      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable, allow_unit_change)')
       .order('product_id');
     const existingItems = (inv as InventoryItem[]) || [];
     const existingProductIds = new Set(existingItems.map((i) => i.product_id));
@@ -100,17 +106,21 @@ export default function InventoryPage() {
     // 전용상품 중 inventory 레코드가 없는 상품도 표시 (재고 0)
     const { data: exclusiveProducts } = await supabase
       .from('products')
-      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable')
+      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable, allow_unit_change')
       .eq('product_type', 'exclusive')
       .eq('is_active', true);
 
     const missingItems: InventoryItem[] = (exclusiveProducts || [])
       .filter((p: { id: string }) => !existingProductIds.has(p.id))
-      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; sanbang_food_sale_price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean }) => ({
+      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; sanbang_food_sale_price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean; allow_unit_change: boolean }) => ({
         id: `virtual-${p.id}`,
         product_id: p.id,
         quantity: 0,
         loose_pack_qty: 0,
+        on_hand: 0,
+        reserved: 0,
+        on_hand_pack: 0,
+        reserved_pack: 0,
         products: {
           name: p.name,
           spec: p.spec,
@@ -122,6 +132,7 @@ export default function InventoryPage() {
           sanbang_food_sale_price_with_tax: p.sanbang_food_sale_price_with_tax,
           pack_per_box: p.pack_per_box,
           is_loose_pack_sellable: p.is_loose_pack_sellable,
+          allow_unit_change: p.allow_unit_change,
         },
       }));
 
@@ -197,24 +208,31 @@ export default function InventoryPage() {
 
     const change = txType === 'outbound' ? -qty : qty;
     const newQty = item.quantity + change;
+    // A안: 입고/출고/조정은 reserved와 무관 → on_hand 도 quantity 와 같은 폭으로 변함
+    const newOnHand = (item.on_hand || 0) + change;
 
     if (newQty < 0) {
       setError('재고가 부족합니다.');
       setSaving(false);
       return;
     }
+    if (newOnHand < 0) {
+      setError('총재고가 음수가 됩니다. 입력 수량을 확인하세요.');
+      setSaving(false);
+      return;
+    }
 
-    // 재고 레코드가 없으면 생성 (virtual 아이템)
+    // 재고 레코드가 없으면 생성 (virtual 아이템) — 새 행은 reserved=0 이므로 on_hand=quantity
     const isVirtual = item.id.startsWith('virtual-');
     if (isVirtual) {
       const { error: insertErr } = await supabase
         .from('inventory')
-        .insert({ product_id: selectedProduct, quantity: newQty });
+        .insert({ product_id: selectedProduct, quantity: newQty, on_hand: newQty });
       if (insertErr) { setError(insertErr.message); setSaving(false); return; }
     } else {
       const { error: updateErr } = await supabase
         .from('inventory')
-        .update({ quantity: newQty })
+        .update({ quantity: newQty, on_hand: newOnHand })
         .eq('product_id', selectedProduct);
       if (updateErr) { setError(updateErr.message); setSaving(false); return; }
     }
@@ -349,20 +367,34 @@ export default function InventoryPage() {
         )}
       </div>
 
-      {/* 총 재고 가치 — 산방푸드 판매가(=산방에프앤비 매입가) 기준 */}
+      {/* 재고 가치 섹션 (접기/펴기) — 관리자 전용 */}
       {userRole === 'admin' && totalInventoryValue > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-4 flex items-baseline justify-between flex-wrap gap-2">
-          <div>
-            <p className="text-xs text-gray-500">총 재고 가치</p>
-            <p className="text-[11px] text-gray-400 mt-0.5">산방푸드 판매가 기준 (산방에프앤비 매입가 = 상공회의소점 매입가)</p>
-          </div>
-          <p className="text-2xl font-bold text-[#1B4332]">₩{totalInventoryValue.toLocaleString()}</p>
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+          <button
+            type="button"
+            onClick={() => setShowValueSection((v) => !v)}
+            className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-gray-50 transition"
+          >
+            <span className="text-sm font-medium text-gray-600">재고 가치 보기</span>
+            <span className="text-xs text-gray-400">{showValueSection ? '▲ 접기' : '▼ 펴기'}</span>
+          </button>
+          {showValueSection && (
+            <div className="px-5 pb-4 pt-1 flex items-baseline justify-between flex-wrap gap-2 border-t border-gray-100">
+              <div>
+                <p className="text-xs text-gray-500">총 재고 가치</p>
+                <p className="text-[11px] text-gray-400 mt-0.5">산방푸드 판매가 기준 (산방에프앤비 매입가 = 상공회의소점 매입가)</p>
+              </div>
+              <p className="text-2xl font-bold text-[#1B4332]">₩{totalInventoryValue.toLocaleString()}</p>
+            </div>
+          )}
         </div>
       )}
 
-      {/* 재고 현황 카드 */}
+      {/* 재고 현황 카드 — 신화는 전용상품 미노출 (전용 재고는 관리자만, 실재고는 신화가 카운트해서 보고) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {items.map((item) => {
+        {items
+          .filter((item) => userRole !== 'shinwa' || item.products?.product_type === 'general')
+          .map((item) => {
           const isLow = item.quantity <= 3;
           const ppb = item.products?.pack_per_box || 1;
           const hasLoose = (item.loose_pack_qty || 0) > 0;
@@ -402,8 +434,44 @@ export default function InventoryPage() {
                 </button>
               </div>
 
-              {/* 재고 가치 — 산방푸드 판매가 기준 */}
-              {showValue && (
+              {/* 재고 3분할 — 관리자 전용 (A안: on_hand / reserved / quantity=available) */}
+              {userRole === 'admin' && (
+                <div className="mt-3 pt-3 border-t border-gray-100">
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div className="bg-gray-50 rounded-md py-1.5">
+                      <p className="text-[11px] text-gray-500">총재고</p>
+                      <p className="text-lg font-bold text-gray-800">{item.on_hand}</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-md py-1.5">
+                      <p className="text-[11px] text-gray-500">나갈것들</p>
+                      <p className="text-lg font-bold text-gray-800">{item.reserved}</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-md py-1.5">
+                      <p className="text-[11px] text-gray-500">주문가능</p>
+                      <p className="text-lg font-bold text-gray-800">{item.quantity}</p>
+                    </div>
+                  </div>
+                  {item.products.allow_unit_change && (
+                    <div className="mt-2 grid grid-cols-3 gap-2 text-center">
+                      <div className="bg-gray-50 rounded-md py-1.5">
+                        <p className="text-[11px] text-gray-500">팩 총재고</p>
+                        <p className="text-lg font-bold text-gray-800">{item.on_hand_pack}</p>
+                      </div>
+                      <div className="bg-gray-50 rounded-md py-1.5">
+                        <p className="text-[11px] text-gray-500">팩 나갈것</p>
+                        <p className="text-lg font-bold text-gray-800">{item.reserved_pack}</p>
+                      </div>
+                      <div className="bg-gray-50 rounded-md py-1.5">
+                        <p className="text-[11px] text-gray-500">팩 주문가능</p>
+                        <p className="text-lg font-bold text-gray-800">{item.loose_pack_qty}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 재고 가치 — 산방푸드 판매가 기준 (상단 토글에 연동) */}
+              {showValue && showValueSection && (
                 <div className="mt-3 pt-3 border-t border-gray-100">
                   <div className="flex items-baseline justify-between">
                     <span className="text-xs text-gray-500">재고 가치</span>

@@ -433,6 +433,70 @@ export default function OrdersPage() {
         </div>
       </div>
 
+      {/* 출고 지연 / 오늘 출고 알림 — 관리자 + 신화 전용 */}
+      {(profile?.role === 'admin' || profile?.role === 'shinwa') && (() => {
+        const now = new Date();
+        const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        const delayedOrders = orders.filter(
+          (o) => o.status === 'confirmed' && o.ship_date && o.ship_date < todayStr
+        );
+        const todayOrders = orders.filter(
+          (o) => o.status === 'confirmed' && o.ship_date && o.ship_date === todayStr
+        );
+        if (delayedOrders.length === 0 && todayOrders.length === 0) return null;
+        return (
+          <div className="space-y-3">
+            {delayedOrders.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-semibold text-red-700">
+                    출고 지연 ({delayedOrders.length}건)
+                  </span>
+                  <span className="text-[11px] text-red-600">출고일 지났는데 출고완료 처리 안 됨</span>
+                </div>
+                <div className="space-y-1">
+                  {delayedOrders.map((o) => (
+                    <button
+                      key={o.id}
+                      onClick={() => loadOrderDetail(o)}
+                      className="w-full text-left flex items-center justify-between px-3 py-2 bg-white rounded-lg hover:bg-red-100 transition border border-red-100"
+                    >
+                      <span className="text-sm text-gray-800">
+                        {o.order_number} · {o.stores?.short_name || o.stores?.name}
+                      </span>
+                      <span className="text-xs text-red-700 font-medium">{o.ship_date}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {todayOrders.length > 0 && (
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-semibold text-gray-700">
+                    오늘 출고 예정 ({todayOrders.length}건)
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  {todayOrders.map((o) => (
+                    <button
+                      key={o.id}
+                      onClick={() => loadOrderDetail(o)}
+                      className="w-full text-left flex items-center justify-between px-3 py-2 bg-white rounded-lg hover:bg-gray-100 transition border border-gray-100"
+                    >
+                      <span className="text-sm text-gray-800">
+                        {o.order_number} · {o.stores?.short_name || o.stores?.name}
+                      </span>
+                      <span className="text-xs text-gray-600">{o.ship_date}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* 상태 필터 */}
       <div className="flex gap-2 flex-wrap">
         {[

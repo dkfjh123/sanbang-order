@@ -349,14 +349,18 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
       if (unit === 'box') {
         const { data: inv } = await adminSupabase
           .from('inventory')
-          .select('quantity')
+          .select('quantity, reserved')
           .eq('product_id', item.product_id)
           .single();
 
         if (inv) {
+          // A안: 발주 취소 = 발주 생성의 거울. quantity 복구 + reserved 차감.
           await adminSupabase
             .from('inventory')
-            .update({ quantity: inv.quantity + item.quantity })
+            .update({
+              quantity: inv.quantity + item.quantity,
+              reserved: Math.max(0, (inv.reserved || 0) - item.quantity),
+            })
             .eq('product_id', item.product_id);
 
           await adminSupabase
@@ -450,6 +454,52 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
   if (order.status !== 'confirmed') {
     return NextResponse.json({ error: '확정된 주문만 출고 처리할 수 있습니다.' }, { status: 400 });
+  }
+
+  // A안: 출고완료 시점에 reserved/on_hand(또는 reserved_pack/on_hand_pack) 차감.
+  //  - quantity / loose_pack_qty 는 발주 시점에 이미 줄였으므로 그대로 둠.
+  //  - inventory_transactions 는 발주 시점에 outbound 가 이미 기록됨 → 중복 방지 위해 여기선 추가 안 함.
+  const { data: shipItems } = await adminSupabase
+    .from('order_items')
+    .select('product_id, quantity, unit')
+    .eq('order_id', id);
+
+  if (shipItems) {
+    for (const it of shipItems as Array<{ product_id: string; quantity: number; unit: 'box' | 'pack' | null }>) {
+      const unit = it.unit || 'box';
+      if (unit === 'box') {
+        const { data: inv } = await adminSupabase
+          .from('inventory')
+          .select('reserved, on_hand')
+          .eq('product_id', it.product_id)
+          .single();
+        if (inv) {
+          await adminSupabase
+            .from('inventory')
+            .update({
+              reserved: Math.max(0, (inv.reserved || 0) - it.quantity),
+              on_hand:  Math.max(0, (inv.on_hand  || 0) - it.quantity),
+            })
+            .eq('product_id', it.product_id);
+        }
+      } else {
+        // 팩 단위 출고완료 — reserved_pack / on_hand_pack 차감
+        const { data: inv } = await adminSupabase
+          .from('inventory')
+          .select('reserved_pack, on_hand_pack')
+          .eq('product_id', it.product_id)
+          .single();
+        if (inv) {
+          await adminSupabase
+            .from('inventory')
+            .update({
+              reserved_pack: Math.max(0, (inv.reserved_pack || 0) - it.quantity),
+              on_hand_pack:  Math.max(0, (inv.on_hand_pack  || 0) - it.quantity),
+            })
+            .eq('product_id', it.product_id);
+        }
+      }
+    }
   }
 
   await adminSupabase.from('orders').update({ status: 'shipped' }).eq('id', id);

@@ -72,6 +72,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
 
     // 재고 차감 — 하나라도 실패하면 이전 차감분 복구
+    // A안: RPC가 quantity/loose_pack_qty 처리 + 추가로 on_hand / on_hand_pack 도 같이 차감
+    //      (B2B 는 발주 등록 시점에 inventory를 안 건드리는 기존 흐름 유지. POST 시 reserved 추적은 다음 이터레이션)
     const applied: { product_id: string; unit: string; quantity: number }[] = [];
     for (const it of items) {
       if (!it.product_id) continue;
@@ -83,7 +85,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         p_actor: user.id,
       });
       if (error) {
-        // rollback 이전 차감분
+        // rollback 이전 차감분 (RPC + on_hand)
         for (const a of applied) {
           await adminSupabase.rpc('apply_b2b_inventory_delta', {
             p_product_id: a.product_id,
@@ -92,9 +94,44 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
             p_description: `B2B 출고 롤백 (${order.order_number})`,
             p_actor: user.id,
           });
+          const { data: invR } = await adminSupabase
+            .from('inventory')
+            .select('on_hand, on_hand_pack')
+            .eq('product_id', a.product_id)
+            .single();
+          if (invR) {
+            if (a.unit === 'box') {
+              await adminSupabase.from('inventory')
+                .update({ on_hand: (invR.on_hand || 0) + a.quantity })
+                .eq('product_id', a.product_id);
+            } else {
+              await adminSupabase.from('inventory')
+                .update({ on_hand_pack: (invR.on_hand_pack || 0) + a.quantity })
+                .eq('product_id', a.product_id);
+            }
+          }
         }
         return NextResponse.json({ error: `재고 차감 실패: ${error.message}` }, { status: 400 });
       }
+
+      // on_hand / on_hand_pack 도 같이 차감 (실제 창고 박스 빠짐)
+      const { data: inv } = await adminSupabase
+        .from('inventory')
+        .select('on_hand, on_hand_pack')
+        .eq('product_id', it.product_id)
+        .single();
+      if (inv) {
+        if (it.unit === 'box') {
+          await adminSupabase.from('inventory')
+            .update({ on_hand: Math.max(0, (inv.on_hand || 0) - it.quantity) })
+            .eq('product_id', it.product_id);
+        } else {
+          await adminSupabase.from('inventory')
+            .update({ on_hand_pack: Math.max(0, (inv.on_hand_pack || 0) - it.quantity) })
+            .eq('product_id', it.product_id);
+        }
+      }
+
       applied.push({ product_id: it.product_id, unit: it.unit, quantity: it.quantity });
     }
 
@@ -134,6 +171,23 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         });
         if (error) {
           return NextResponse.json({ error: `재고 복구 실패: ${error.message}` }, { status: 400 });
+        }
+        // A안: on_hand / on_hand_pack 도 같이 복구 (반품 = 박스가 창고로 돌아옴)
+        const { data: inv } = await adminSupabase
+          .from('inventory')
+          .select('on_hand, on_hand_pack')
+          .eq('product_id', it.product_id)
+          .single();
+        if (inv) {
+          if (it.unit === 'box') {
+            await adminSupabase.from('inventory')
+              .update({ on_hand: (inv.on_hand || 0) + it.quantity })
+              .eq('product_id', it.product_id);
+          } else {
+            await adminSupabase.from('inventory')
+              .update({ on_hand_pack: (inv.on_hand_pack || 0) + it.quantity })
+              .eq('product_id', it.product_id);
+          }
         }
       }
     }

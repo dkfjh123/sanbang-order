@@ -153,13 +153,13 @@ export async function POST(request: Request) {
   const productIds = items.map((item) => item.product_id);
   const { data: inventoryData } = await adminSupabase
     .from('inventory')
-    .select('product_id, quantity, loose_pack_qty, products(name, pack_per_box)')
+    .select('product_id, quantity, loose_pack_qty, reserved, reserved_pack, products(name, pack_per_box)')
     .in('product_id', productIds);
 
   for (const item of items) {
     const unit = item.unit || 'box';
     const inv = inventoryData?.find((i: { product_id: string }) => i.product_id === item.product_id) as
-      | { quantity: number; loose_pack_qty: number; products: { pack_per_box: number } | null }
+      | { quantity: number; loose_pack_qty: number; reserved: number; reserved_pack: number; products: { pack_per_box: number } | null }
       | undefined;
 
     if (!inv) {
@@ -250,10 +250,14 @@ export async function POST(request: Request) {
   const rollbackAll = async () => {
     for (const a of appliedBox) {
       const { data: cur } = await adminSupabase
-        .from('inventory').select('quantity').eq('product_id', a.product_id).single();
+        .from('inventory').select('quantity, reserved').eq('product_id', a.product_id).single();
       if (cur) {
+        // A안: quantity 복구 + reserved 도 같이 차감 (둘 다 거울처럼)
         await adminSupabase.from('inventory')
-          .update({ quantity: cur.quantity + a.quantity })
+          .update({
+            quantity: cur.quantity + a.quantity,
+            reserved: Math.max(0, (cur.reserved || 0) - a.quantity),
+          })
           .eq('product_id', a.product_id);
         await adminSupabase.from('inventory_transactions').insert({
           product_id: a.product_id, type: 'inbound', quantity: a.quantity,
@@ -277,9 +281,14 @@ export async function POST(request: Request) {
 
       if (unit === 'box') {
         const newQty = inv.quantity - item.quantity;
+        // A안: 발주 시점에는 매장주문가능(quantity)을 줄이고 나갈것들(reserved)에 같은 양 추가.
+        // on_hand 는 안 건드림 (실제 출고는 신화가 출고완료 누를 때).
         await adminSupabase
           .from('inventory')
-          .update({ quantity: newQty })
+          .update({
+            quantity: newQty,
+            reserved: (inv.reserved || 0) + item.quantity,
+          })
           .eq('product_id', item.product_id);
 
         await adminSupabase
