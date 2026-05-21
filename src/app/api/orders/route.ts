@@ -178,11 +178,11 @@ export async function POST(request: Request) {
         }, { status: 400 });
       }
     } else {
-      const ppb = item.pack_per_box || inv.products?.pack_per_box || 1;
-      const availablePacks = inv.loose_pack_qty + inv.quantity * ppb;
-      if (availablePacks < item.quantity) {
+      // 단순화 옵션: 가맹점은 자투리(loose_pack_qty) 한도 내에서만 팩 발주.
+      //               박스 분해는 B2B 팩 SHIP 시점에만 발생.
+      if (inv.loose_pack_qty < item.quantity) {
         return NextResponse.json({
-          error: `${item.product_name} 낱팩 재고가 부족합니다. (가용: ${availablePacks}팩, 주문: ${item.quantity}팩)`,
+          error: `${item.product_name} 낱팩 재고가 부족합니다. (현재 자투리: ${inv.loose_pack_qty}팩, 주문: ${item.quantity}팩). 박스 단위로 주문하시거나 자투리 재고가 생긴 후 다시 시도해주세요.`,
         }, { status: 400 });
       }
     }
@@ -266,10 +266,15 @@ export async function POST(request: Request) {
       }
     }
     for (const a of appliedPack) {
-      await adminSupabase.rpc('apply_b2b_inventory_delta', {
-        p_product_id: a.product_id, p_unit: 'pack', p_delta: -a.quantity,
-        p_description: `발주 실패 롤백 (${orderNumber})`, p_actor: user.id,
-      });
+      const { data: cur } = await adminSupabase
+        .from('inventory').select('loose_pack_qty, reserved_pack').eq('product_id', a.product_id).single();
+      if (cur) {
+        // 단순화 옵션: 가맹점 팩 롤백 = loose 복구 + reserved_pack 차감
+        await adminSupabase.from('inventory').update({
+          loose_pack_qty: (cur.loose_pack_qty || 0) + a.quantity,
+          reserved_pack:  Math.max(0, (cur.reserved_pack || 0) - a.quantity),
+        }).eq('product_id', a.product_id);
+      }
     }
   };
 
@@ -302,18 +307,40 @@ export async function POST(request: Request) {
           });
         appliedBox.push({ product_id: item.product_id, quantity: item.quantity });
       } else {
-        const { error: rpcError } = await adminSupabase.rpc('apply_b2b_inventory_delta', {
-          p_product_id: item.product_id,
-          p_unit: 'pack',
-          p_delta: item.quantity,
-          p_description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name} · 낱팩`,
-          p_actor: user.id,
-        });
-        if (rpcError) {
+        // 단순화 옵션: 가맹점 팩 발주 = 자투리(loose_pack_qty)에서만 차감 + reserved_pack 가산.
+        //              박스 분해 안 함. 부족하면 사전 검증에서 이미 거부됐어야 함.
+        const { data: invCur } = await adminSupabase
+          .from('inventory')
+          .select('loose_pack_qty, reserved_pack')
+          .eq('product_id', item.product_id)
+          .single();
+        if (!invCur || invCur.loose_pack_qty < item.quantity) {
           await rollbackAll();
           await adminSupabase.from('orders').delete().eq('id', order.id);
-          return NextResponse.json({ error: `낱팩 차감 실패: ${rpcError.message}` }, { status: 400 });
+          return NextResponse.json({
+            error: `${item.product_name} 낱팩 재고 부족 (자투리: ${invCur?.loose_pack_qty ?? 0}팩)`,
+          }, { status: 400 });
         }
+        const { error: updErr } = await adminSupabase
+          .from('inventory')
+          .update({
+            loose_pack_qty: invCur.loose_pack_qty - item.quantity,
+            reserved_pack:  (invCur.reserved_pack || 0) + item.quantity,
+          })
+          .eq('product_id', item.product_id);
+        if (updErr) {
+          await rollbackAll();
+          await adminSupabase.from('orders').delete().eq('id', order.id);
+          return NextResponse.json({ error: `낱팩 차감 실패: ${updErr.message}` }, { status: 400 });
+        }
+        await adminSupabase.from('inventory_transactions').insert({
+          product_id: item.product_id,
+          type: 'outbound',
+          quantity: -item.quantity,
+          unit: 'pack',
+          description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name} · 낱팩`,
+          created_by: user.id,
+        });
         appliedPack.push({ product_id: item.product_id, quantity: item.quantity });
       }
     }

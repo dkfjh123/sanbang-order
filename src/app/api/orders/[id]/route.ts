@@ -374,14 +374,26 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
             });
         }
       } else {
-        // 낱팩 주문: RPC 음수 델타로 복구 (낱팩 누적 → 박스 승격)
-        await adminSupabase.rpc('apply_b2b_inventory_delta', {
-          p_product_id: item.product_id,
-          p_unit: 'pack',
-          p_delta: -item.quantity,
-          p_description: `발주 취소 복구 (${order.order_number}) · 낱팩`,
-          p_actor: user.id,
-        });
+        // 단순화 옵션: 팩 취소 복구 = loose_pack_qty 복구 + reserved_pack 차감. 박스 승격 안 함.
+        const { data: inv } = await adminSupabase
+          .from('inventory')
+          .select('loose_pack_qty, reserved_pack')
+          .eq('product_id', item.product_id)
+          .single();
+        if (inv) {
+          await adminSupabase.from('inventory').update({
+            loose_pack_qty: (inv.loose_pack_qty || 0) + item.quantity,
+            reserved_pack:  Math.max(0, (inv.reserved_pack || 0) - item.quantity),
+          }).eq('product_id', item.product_id);
+          await adminSupabase.from('inventory_transactions').insert({
+            product_id: item.product_id,
+            type: 'inbound',
+            quantity: item.quantity,
+            unit: 'pack',
+            description: `발주 취소 복구 (${order.order_number}) · 낱팩`,
+            created_by: user.id,
+          });
+        }
       }
     }
   }

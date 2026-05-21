@@ -515,6 +515,30 @@ export default function NewOrderPage() {
         </div>
       )}
 
+      {/* 낱팩 잔량 발주 가능 안내 (전용상품 중 loose_pack_qty > 0) */}
+      {(() => {
+        const looseItems = products.filter(
+          (p) => p.product_type === 'exclusive' && (loosePack[p.id] || 0) > 0
+        );
+        if (looseItems.length === 0) return null;
+        return (
+          <div className="rounded-xl p-4 shadow-sm border bg-amber-50 border-amber-200">
+            <p className="text-sm font-bold text-amber-900 mb-1">낱팩 잔량 발주 가능</p>
+            <p className="text-xs text-amber-700 mb-3">
+              아래 상품은 낱팩(개) 단위로도 주문하실 수 있습니다. 잔량 한도 내에서만 발주 가능합니다.
+            </p>
+            <ul className="text-sm text-gray-800 bg-white/70 rounded-lg overflow-hidden">
+              {looseItems.map((p) => (
+                <li key={p.id} className="flex justify-between border-b border-amber-100 py-2 px-3 last:border-b-0">
+                  <span>{p.name}</span>
+                  <span className="font-bold text-amber-800">{loosePack[p.id] || 0}팩 남음</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })()}
+
       {/* 제주 파레트 현황 (관리자/신화만) */}
       {(profile?.role === 'admin' || profile?.role === 'shinwa') && (
         <div className={`rounded-xl p-4 shadow-sm border ${

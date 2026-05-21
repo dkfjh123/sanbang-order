@@ -204,6 +204,92 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: itemsError.message }, { status: 400 });
   }
 
+  // 단순화 옵션: B2B 발주는 박스 환산으로 reserved 잡음.
+  //  - box row:  reserved += qty,                 quantity -= qty
+  //  - pack row: reserved += CEIL(qty / pack_per_box), quantity -= 같은 값
+  //              (자투리는 SHIP 시점에 loose_pack_qty / on_hand_pack 으로 발생)
+  // 한 발주 안에 같은 product_id 의 box/pack 이 둘 다 있을 수 있으므로 product 단위로 누적.
+  type Delta = { box: number };
+  const deltaByProduct = new Map<string, Delta>();
+  for (const item of normalizedItems) {
+    const boxes = item.unit === 'box'
+      ? item.quantity
+      : Math.ceil(item.quantity / item.pack_per_box);
+    const cur = deltaByProduct.get(item.product_id) || { box: 0 };
+    cur.box += boxes;
+    deltaByProduct.set(item.product_id, cur);
+  }
+
+  // 박스 재고 부족 검증 (단순화 옵션: 박스만 본다)
+  if (deltaByProduct.size > 0) {
+    const { data: invRows } = await adminSupabase
+      .from('inventory')
+      .select('product_id, quantity, reserved')
+      .in('product_id', [...deltaByProduct.keys()]);
+    const invByPid = new Map(
+      (invRows || []).map((r: { product_id: string; quantity: number; reserved: number }) => [r.product_id, r])
+    );
+    for (const [pid, d] of deltaByProduct) {
+      const inv = invByPid.get(pid);
+      const name = productMap.get(pid)?.name || pid;
+      if (!inv || inv.quantity < d.box) {
+        await adminSupabase.from('b2b_order_items').delete().eq('order_id', order.id);
+        await adminSupabase.from('b2b_orders').delete().eq('id', order.id);
+        return NextResponse.json({
+          error: `${name}: 박스 재고 부족 (가용 ${inv?.quantity ?? 0}박스, 필요 ${d.box}박스)`,
+        }, { status: 400 });
+      }
+    }
+  }
+
+  // inventory 갱신 + outbound 기록 (실패 시 롤백)
+  const applied: Array<{ product_id: string; box: number }> = [];
+  let inventoryError: string | null = null;
+  for (const [pid, d] of deltaByProduct) {
+    const { data: inv } = await adminSupabase
+      .from('inventory')
+      .select('quantity, reserved')
+      .eq('product_id', pid)
+      .single();
+    if (!inv) continue;
+    const { error: updErr } = await adminSupabase
+      .from('inventory')
+      .update({
+        quantity: inv.quantity - d.box,
+        reserved: (inv.reserved || 0) + d.box,
+      })
+      .eq('product_id', pid);
+    if (updErr) { inventoryError = updErr.message; break; }
+
+    await adminSupabase.from('inventory_transactions').insert({
+      product_id: pid,
+      type: 'outbound',
+      quantity: -d.box,
+      unit: 'box',
+      description: `B2B 발주 등록 (${orderNumber}) — 박스 환산 ${d.box}박스`,
+      created_by: user.id,
+    });
+    applied.push({ product_id: pid, box: d.box });
+  }
+
+  if (inventoryError) {
+    for (const a of applied) {
+      const { data: cur } = await adminSupabase
+        .from('inventory').select('quantity, reserved').eq('product_id', a.product_id).single();
+      if (cur) {
+        await adminSupabase.from('inventory')
+          .update({
+            quantity: cur.quantity + a.box,
+            reserved: Math.max(0, (cur.reserved || 0) - a.box),
+          })
+          .eq('product_id', a.product_id);
+      }
+    }
+    await adminSupabase.from('b2b_order_items').delete().eq('order_id', order.id);
+    await adminSupabase.from('b2b_orders').delete().eq('id', order.id);
+    return NextResponse.json({ error: `재고 갱신 실패: ${inventoryError}` }, { status: 400 });
+  }
+
   await adminSupabase.from('b2b_order_logs').insert({
     order_id: order.id,
     action: 'create',
