@@ -157,25 +157,20 @@ for (const it of items || []) {
       console.log(`  ⚠ inventory 레코드 없음: ${it.product_name} (범용상품일 가능성, 스킵)`);
     }
   } else {
-    // 팩 복구: apply_b2b_inventory_delta 로 음수 델타 (낱팩 증가 + 승격 처리)
-    const { error } = await supabase.rpc('apply_b2b_inventory_delta', {
-      p_product_id: it.product_id,
-      p_unit: 'pack',
-      p_delta: -it.quantity,
-      p_description: `테스트 발주 purge (${orderNumber}) · 낱팩`,
-      p_actor: null,
-    });
-    if (error) { console.error('팩 RPC 실패:', error); process.exit(1); }
-    // RPC 가 별도 inventory_transactions 레코드를 남기는지 확인 필요 — 남기면 추가 삭제
-    const { data: extra } = await supabase
-      .from('inventory_transactions')
-      .select('id')
-      .ilike('description', `%${orderNumber}%`);
-    if (extra && extra.length > 0) {
-      await supabase.from('inventory_transactions').delete().in('id', extra.map((e) => e.id));
-      console.log(`  ✓ 팩 RPC가 남긴 inventory_transactions ${extra.length}건 추가 삭제`);
+    // 팩 복구 (단순화 옵션): loose_pack_qty 복구 + reserved_pack 차감. 박스 분해 안 함.
+    const { data: inv } = await supabase
+      .from('inventory')
+      .select('loose_pack_qty, reserved_pack')
+      .eq('product_id', it.product_id)
+      .single();
+    if (inv) {
+      const { error } = await supabase.from('inventory').update({
+        loose_pack_qty: (inv.loose_pack_qty || 0) + it.quantity,
+        reserved_pack:  Math.max(0, (inv.reserved_pack || 0) - it.quantity),
+      }).eq('product_id', it.product_id);
+      if (error) { console.error('팩 복구 실패:', error); process.exit(1); }
+      console.log(`  ✓ pack ${it.product_name} loose +${it.quantity}, reserved_pack -${it.quantity}`);
     }
-    console.log(`  ✓ pack ${it.product_name} -${it.quantity} (RPC 복구)`);
   }
 }
 

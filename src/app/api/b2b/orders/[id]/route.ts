@@ -151,6 +151,28 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       ...logActor,
     });
 
+    // 자투리 발생 → 가맹점 공지 자동 등록 (전체 매장 대상)
+    const looseAddedProducts = applied.filter((a) => a.loosePackAdd > 0);
+    if (looseAddedProducts.length > 0) {
+      const { data: prods } = await adminSupabase
+        .from('products')
+        .select('id, name')
+        .in('id', looseAddedProducts.map((a) => a.product_id));
+      const nameByPid = new Map((prods || []).map((p: { id: string; name: string }) => [p.id, p.name]));
+      const lines = looseAddedProducts
+        .map((a) => `· ${nameByPid.get(a.product_id) || ''} +${a.loosePackAdd}팩`)
+        .join('\n');
+      await adminSupabase.from('notices').insert({
+        title: '낱팩 자투리 발주 가능',
+        content: `B2B 출고로 박스 분해 시 자투리가 발생했습니다. 아래 상품은 낱팩 단위로 주문하실 수 있습니다 (선착순 한도 내).\n\n${lines}\n\n발주 화면 > "낱팩 잔량 발주 가능" 안내에서 확인.`,
+        is_pinned: false,
+        is_active: true,
+        target_type: 'all',
+        target_store_ids: [],
+        created_by: user.id,
+      });
+    }
+
     return NextResponse.json({ success: true });
   }
 
