@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { getStoreDeliverySchedule, type DeliveryInfo } from '@/lib/delivery-schedule';
+import { getStoreDeliverySchedule, getJejuTwoXAdvanceNotice, type DeliveryInfo } from '@/lib/delivery-schedule';
 import type { Profile, DepositRequest } from '@/types';
 
 interface DepositTransaction {
@@ -39,7 +39,10 @@ interface StoreSummary {
 
 const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
 function describeDeliveryDays(store: StoreSummary): string {
-  if (store.region === 'jeju') return '주1회 (목상차)';
+  if (store.region === 'jeju') {
+    const count = getStoreDeliverySchedule({ region: 'jeju', delivery_days: null }).jejuWeeklyCount ?? 1;
+    return count === 2 ? '주2회 (월·목 상차)' : '주1회 (목 상차)';
+  }
   const days = store.delivery_days && store.delivery_days.length > 0 ? store.delivery_days : [1, 3, 5];
   return [...new Set(days)].sort((a, b) => a - b).map((d) => DAY_NAMES[d]).join('·');
 }
@@ -356,6 +359,39 @@ export default function DashboardPage() {
         </p>
       </div>
 
+      {/* ========== 제주 주2회 배송 사전 안내 (제주매장/관리자/신화) ========== */}
+      {(() => {
+        const showFor =
+          profile.role === 'admin' ||
+          profile.role === 'shinwa' ||
+          (profile.role === 'store' && storeRegion === 'jeju');
+        if (!showFor) return null;
+        const n = getJejuTwoXAdvanceNotice();
+        if (!n) return null;
+        return (
+          <div className="rounded-xl p-4 shadow-sm border-2 border-blue-300 bg-blue-50">
+            <div className="flex items-start gap-3">
+              <span className="text-2xl">📢</span>
+              <div className="flex-1">
+                <p className="font-bold text-blue-900">
+                  다음 주는 제주 <span className="underline">주2회 배송 주간</span>입니다
+                </p>
+                <p className="text-sm text-blue-800 mt-1">
+                  추가 배송편(월 상차 → 화 도착) <b>{n.monShipLabel} 상차</b>분은
+                  <b className="text-blue-900"> {n.monDeadlineLabel}까지</b> 발주해 주세요.
+                  {n.daysUntilDeadline > 0 && (
+                    <span className="ml-1 font-bold text-blue-900">(D-{n.daysUntilDeadline})</span>
+                  )}
+                </p>
+                <p className="text-xs text-blue-700 mt-1">
+                  {n.monShipLabel} 상차 → {n.monArrivalLabel} 도착 · 기존 목 상차편(금 도착)도 그대로 있습니다.
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ========== 관리자: 매장별 배송요일 & 마감관리 ========== */}
       {profile.role === 'admin' && storeList.length > 0 && (
         <StoreDeliveryPanel
@@ -522,6 +558,53 @@ export default function DashboardPage() {
         </>
       )}
 
+      {/* ========== 제주 배송 주간 (관리자/신화만) ========== */}
+      {(profile.role === 'admin' || profile.role === 'shinwa') && (() => {
+        const jeju = getStoreDeliverySchedule({ region: 'jeju', delivery_days: null });
+        const twoX = jeju.jejuWeeklyCount === 2;
+        return (
+          <div className={`rounded-xl p-4 shadow-sm border ${
+            twoX ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200'
+          }`}>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-bold text-gray-800">제주 배송</p>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                  twoX ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'
+                }`}>
+                  주{jeju.jejuWeeklyCount ?? 1}회 배송 주간
+                </span>
+              </div>
+              <p className="text-xs text-gray-600">{jeju.scheduleDescription}</p>
+            </div>
+            {jeju.jejuWeekDeliveries && jeju.jejuWeekDeliveries.length > 0 && (
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {jeju.jejuWeekDeliveries.map((d) => (
+                  <div
+                    key={d.kind}
+                    className={`rounded-lg p-2 text-xs border ${
+                      d.isNext
+                        ? 'border-blue-400 bg-white'
+                        : d.isPast
+                          ? 'border-gray-200 bg-gray-100 opacity-60'
+                          : 'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <span className="font-bold text-gray-700">{d.kind === 'mon' ? '월 상차편' : '목 상차편'}</span>
+                    {d.isNext ? (
+                      <span className="ml-1 text-[10px] font-bold text-blue-700">· 다음</span>
+                    ) : d.isPast ? (
+                      <span className="ml-1 text-[10px] text-gray-400">· 마감</span>
+                    ) : null}
+                    <p className="text-gray-500 mt-0.5">{d.shipLabel} 상차 → {d.arrivalLabel} 도착</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* ========== 제주 파레트 현황 (관리자/신화만) ========== */}
       {(profile.role === 'admin' || profile.role === 'shinwa') && (
         <div className={`rounded-xl p-4 shadow-sm border ${
@@ -657,12 +740,60 @@ export default function DashboardPage() {
                       ? 'bg-amber-100 text-amber-800'
                       : 'bg-emerald-100 text-emerald-800'
               }`}>
-                <span>{storeRegion === 'jeju' ? '제주 배송 스케줄' : '서울·내륙 배송 스케줄'}</span>
+                <span className="flex items-center gap-2">
+                  {storeRegion === 'jeju' ? '제주 배송 스케줄' : '서울·내륙 배송 스케줄'}
+                  {storeRegion === 'jeju' && deliveryInfo.jejuWeeklyCount && (
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                      deliveryInfo.jejuWeeklyCount === 2 ? 'bg-blue-600 text-white' : 'bg-white/70 text-gray-700'
+                    }`}>
+                      주{deliveryInfo.jejuWeeklyCount}회 배송 주간
+                    </span>
+                  )}
+                </span>
                 <a href="/orders/new" className="text-sm underline opacity-75 hover:opacity-100">발주하기 →</a>
               </div>
               <div className="px-5 py-2 text-center text-sm text-gray-600 border-b border-white/50">
                 {deliveryInfo.scheduleDescription}
               </div>
+              {/* 제주 주2회 주간: 두 배송편 안내 */}
+              {deliveryInfo.jejuWeekDeliveries && deliveryInfo.jejuWeekDeliveries.length > 0 && (
+                <div className="px-5 py-3 border-b border-white/50 bg-white/40">
+                  <p className="text-xs font-bold text-gray-600 mb-2">
+                    이 배송 주간은 배송이 2회입니다 — 가장 가까운 마감 기준 자동 배정
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {deliveryInfo.jejuWeekDeliveries.map((d) => (
+                      <div
+                        key={d.kind}
+                        className={`rounded-lg p-2.5 text-xs border ${
+                          d.isNext
+                            ? 'border-blue-400 bg-blue-50'
+                            : d.isPast
+                              ? 'border-gray-200 bg-gray-100 opacity-60'
+                              : 'border-gray-200 bg-white'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-bold text-gray-700">
+                            {d.kind === 'mon' ? '월 상차편' : '목 상차편'}
+                          </span>
+                          {d.isNext ? (
+                            <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">
+                              다음 배송
+                            </span>
+                          ) : d.isPast ? (
+                            <span className="text-[10px] text-gray-400">마감됨</span>
+                          ) : null}
+                        </div>
+                        <p className="text-gray-500">마감 {d.deadlineLabel}</p>
+                        <p className="text-gray-700 font-medium mt-0.5">
+                          {d.shipLabel} 상차 → {d.arrivalLabel} 도착
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="px-5 py-5">
                 {deliveryInfo.isPastDeadline ? (
                   <div className="text-center py-2">

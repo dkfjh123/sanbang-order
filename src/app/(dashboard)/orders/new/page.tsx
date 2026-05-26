@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import {
   getStoreDeliverySchedule,
   getUpcomingDeliveryDates,
+  getJejuTwoXAdvanceNotice,
   toLocalISODate,
   type DeliveryInfo,
 } from '@/lib/delivery-schedule';
@@ -431,6 +432,34 @@ export default function NewOrderPage() {
         </div>
       )}
 
+      {/* 제주 주2회 배송 사전 안내 */}
+      {store?.region === 'jeju' && (() => {
+        const n = getJejuTwoXAdvanceNotice();
+        if (!n) return null;
+        return (
+          <div className="rounded-xl p-4 shadow-sm border-2 border-blue-300 bg-blue-50">
+            <div className="flex items-start gap-3">
+              <span className="text-2xl">📢</span>
+              <div className="flex-1">
+                <p className="font-bold text-blue-900">
+                  다음 주는 <span className="underline">주2회 배송 주간</span>입니다
+                </p>
+                <p className="text-sm text-blue-800 mt-1">
+                  추가 배송편(월 상차 → 화 도착) <b>{n.monShipLabel} 상차</b>분은
+                  <b className="text-blue-900"> {n.monDeadlineLabel}까지</b> 발주해 주세요.
+                  {n.daysUntilDeadline > 0 && (
+                    <span className="ml-1 font-bold text-blue-900">(D-{n.daysUntilDeadline})</span>
+                  )}
+                </p>
+                <p className="text-xs text-blue-700 mt-1">
+                  {n.monShipLabel} 상차 → {n.monArrivalLabel} 도착 · 기존 목 상차편(금 도착)도 그대로 있습니다.
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* 배송 스케줄 안내 — 크고 잘 보이게 */}
       {store && deliveryInfo && (
         <div className={`rounded-xl shadow-sm border-2 overflow-hidden ${
@@ -451,7 +480,16 @@ export default function NewOrderPage() {
                   ? 'bg-amber-100 text-amber-800'
                   : 'bg-emerald-100 text-emerald-800'
           }`}>
-            <span>{store.region === 'jeju' ? '제주 배송 스케줄' : '서울·내륙 배송 스케줄'}</span>
+            <span className="flex items-center gap-2">
+              {store.region === 'jeju' ? '제주 배송 스케줄' : '서울·내륙 배송 스케줄'}
+              {store.region === 'jeju' && deliveryInfo.jejuWeeklyCount && (
+                <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                  deliveryInfo.jejuWeeklyCount === 2 ? 'bg-blue-600 text-white' : 'bg-white/70 text-gray-700'
+                }`}>
+                  주{deliveryInfo.jejuWeeklyCount}회 배송 주간
+                </span>
+              )}
+            </span>
             {deliveryInfo.isOverrideActive && (
               <span className="text-sm font-bold">⏳ 관리자 마감 연장 중</span>
             )}
@@ -460,6 +498,46 @@ export default function NewOrderPage() {
           <div className="px-5 py-2 text-center text-sm text-gray-600 border-b border-white/50">
             {deliveryInfo.scheduleDescription}
           </div>
+
+          {/* 제주 주2회 주간: 그 주의 두 배송편 안내 (다음 배송 강조) */}
+          {deliveryInfo.jejuWeekDeliveries && deliveryInfo.jejuWeekDeliveries.length > 0 && (
+            <div className="px-5 py-3 border-b border-white/50 bg-white/40">
+              <p className="text-xs font-bold text-gray-600 mb-2">
+                이 배송 주간은 배송이 2회입니다 — 가장 가까운 마감 기준으로 자동 배정됩니다
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {deliveryInfo.jejuWeekDeliveries.map((d) => (
+                  <div
+                    key={d.kind}
+                    className={`rounded-lg p-2.5 text-xs border ${
+                      d.isNext
+                        ? 'border-blue-400 bg-blue-50'
+                        : d.isPast
+                          ? 'border-gray-200 bg-gray-100 opacity-60'
+                          : 'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-bold text-gray-700">
+                        {d.kind === 'mon' ? '월 상차편' : '목 상차편'}
+                      </span>
+                      {d.isNext ? (
+                        <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">
+                          다음 배송
+                        </span>
+                      ) : d.isPast ? (
+                        <span className="text-[10px] text-gray-400">마감됨</span>
+                      ) : null}
+                    </div>
+                    <p className="text-gray-500">마감 {d.deadlineLabel}</p>
+                    <p className="text-gray-700 font-medium mt-0.5">
+                      {d.shipLabel} 상차 → {d.arrivalLabel} 도착
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="px-5 py-5">
             {deliveryInfo.isPastDeadline ? (
