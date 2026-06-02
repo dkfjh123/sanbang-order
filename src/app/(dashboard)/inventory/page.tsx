@@ -36,6 +36,36 @@ interface InventoryTx {
   unit: 'box' | 'pack';
   description: string | null;
   created_at: string;
+  source?: string | null;
+}
+
+// 출고완료 주문 1줄 (가맹/B2B) — 출고탭/전체탭 표시용 (orders 기준)
+interface ShipmentRow {
+  id: string;
+  product_id: string | null;
+  product_name: string;
+  qty: number;
+  unit: 'box' | 'pack';
+  ship_date: string;
+  store: string;
+  order_number: string;
+  isB2B: boolean;
+}
+
+// 이력보기 표시 행 — 입고(트랜잭션) 또는 출고완료(주문)
+type DisplayRow =
+  | { kind: 'inbound'; date: string; tx: InventoryTx }
+  | { kind: 'shipment'; date: string; ship: ShipmentRow };
+
+// 수동 입고(제조사 입고)인가? — source 우선, 없으면 설명 패턴 fallback (031 백필 전 데이터 대비)
+function isManualInbound(tx: { source?: string | null; type: string; description: string | null }) {
+  if (tx.type !== 'inbound') return false;
+  if (tx.source === 'manual_inbound') return true;
+  if (tx.source === 'manual_adjust') return false;
+  const d = tx.description || '';
+  if (/^(발주|B2B|b2b)/.test(d)) return false;                              // 발주/B2B 시스템 자동
+  if (/복구|복수|조정|반품|정합|차감|회수|돼봉삼겹살/.test(d)) return false;   // 수기 조정/복구
+  return true;
 }
 
 const storageLabel: Record<string, string> = {
@@ -59,6 +89,8 @@ export default function InventoryPage() {
   const [transactions, setTransactions] = useState<InventoryTx[]>([]);
   // 잔량 계산용 — 필터 시작일 이후 모든 트랜잭션 (표시 범위 밖도 포함)
   const [txsForBalance, setTxsForBalance] = useState<InventoryTx[]>([]);
+  // 출고탭/전체탭 — 출고완료 주문(가맹+B2B), 배송일 기준
+  const [shipments, setShipments] = useState<ShipmentRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState('');
@@ -142,6 +174,64 @@ export default function InventoryPage() {
 
   // 입출고 이력 조회 (기간 기준 KR 자정, 타입은 client-side 필터)
   // 잔량 계산용으로 필터 종료일 이후 트랜잭션도 함께 로드 (표시는 기간 내만).
+  // 출고완료 주문(가맹+B2B)을 배송일 기준으로 로드 — 출고탭/전체탭 표시용 (재고 변경 없음, 읽기만)
+  async function loadShipments(start: string, end: string) {
+    const nameToId = new Map<string, string>();
+    for (const it of items) if (it.products?.name) nameToId.set(it.products.name, it.product_id);
+
+    const [{ data: orderData }, { data: b2bData }] = await Promise.all([
+      supabase
+        .from('orders')
+        .select('order_number, ship_date, status, stores(short_name, name), order_items(product_id, product_name, quantity, unit)')
+        .eq('status', 'shipped')
+        .gte('ship_date', start)
+        .lte('ship_date', end),
+      supabase
+        .from('b2b_orders')
+        .select('order_number, ship_date, status, b2b_customers(name), b2b_order_items(product_name, quantity, unit)')
+        .eq('status', 'shipped')
+        .gte('ship_date', start)
+        .lte('ship_date', end),
+    ]);
+
+    const rows: ShipmentRow[] = [];
+    type OrderRow = { order_number: string; ship_date: string; stores: { short_name: string | null; name: string } | null; order_items: Array<{ product_id: string | null; product_name: string; quantity: number; unit: 'box' | 'pack' | null }> };
+    for (const o of ((orderData as unknown as OrderRow[]) || [])) {
+      const store = o.stores?.short_name || o.stores?.name || '매장';
+      for (const it of (o.order_items || [])) {
+        rows.push({
+          id: `o:${o.order_number}:${it.product_id || it.product_name}`,
+          product_id: it.product_id,
+          product_name: it.product_name,
+          qty: it.quantity,
+          unit: (it.unit || 'box'),
+          ship_date: o.ship_date,
+          store,
+          order_number: o.order_number,
+          isB2B: false,
+        });
+      }
+    }
+    type B2bRow = { order_number: string; ship_date: string; b2b_customers: { name: string } | null; b2b_order_items: Array<{ product_name: string; quantity: number; unit: 'box' | 'pack' | null }> };
+    for (const o of ((b2bData as unknown as B2bRow[]) || [])) {
+      const store = o.b2b_customers?.name || 'B2B';
+      for (const it of (o.b2b_order_items || [])) {
+        rows.push({
+          id: `b:${o.order_number}:${it.product_name}`,
+          product_id: nameToId.get(it.product_name) || null,
+          product_name: it.product_name,
+          qty: it.quantity,
+          unit: (it.unit || 'box'),
+          ship_date: o.ship_date,
+          store,
+          order_number: o.order_number,
+          isB2B: true,
+        });
+      }
+    }
+    setShipments(rows);
+  }
+
   async function loadTransactions(start: string, end: string) {
     setTxLoading(true);
     // KR 자정 기준 [start, end+1) — UTC 산술로 다음날 계산하고 +09:00 timezone 명시
@@ -160,6 +250,8 @@ export default function InventoryPage() {
     setTxsForBalance(all);
     // 표시: 기간 내(end 다음 자정 이전)만
     setTransactions(all.filter((tx) => tx.created_at < endNextKR));
+    // 출고탭/전체탭 — 출고완료 주문(가맹+B2B) by ship_date
+    await loadShipments(start, end);
     setTxLoading(false);
   }
 
@@ -238,11 +330,14 @@ export default function InventoryPage() {
     }
 
     // 이력 기록
+    //  - source: '입고' = manual_inbound(제조사 입고, 정산/입고탭 집계 대상)
+    //            '출고'·'조정' = manual_adjust (입고에서 제외)
     await supabase.from('inventory_transactions').insert({
       product_id: selectedProduct,
       type: txType,
       quantity: change,
       description: txDesc || `${txType === 'inbound' ? '입고' : txType === 'outbound' ? '출고' : '조정'}`,
+      source: txType === 'inbound' ? 'manual_inbound' : 'manual_adjust',
       created_by: user.id,
     });
 
@@ -291,11 +386,25 @@ export default function InventoryPage() {
     ));
   };
 
-  const filteredTx = transactions.filter((tx) => {
+  // 입고탭 = 제조사 입고 등 '입고 등록'(manual_inbound) 트랜잭션만
+  const inboundRows = transactions.filter((tx) => {
     if (txFilter && tx.product_id !== txFilter) return false;
-    if (txTypeFilter !== 'all' && tx.type !== txTypeFilter) return false;
-    return true;
+    return isManualInbound(tx);
   });
+  // 출고탭 = 출고완료 주문(가맹+B2B). 상품 필터는 product_id 또는 상품명으로 (B2B는 product_id 없을 수 있음)
+  const selectedName = txFilter ? items.find((i) => i.product_id === txFilter)?.products?.name : null;
+  const shipmentRows = shipments.filter((s) => {
+    if (!txFilter) return true;
+    return s.product_id === txFilter || (!!selectedName && s.product_name === selectedName);
+  });
+  // 탭별 표시 목록 — 입고/출고완료/전체(둘 합쳐 날짜 내림차순)
+  const displayRows: DisplayRow[] = (() => {
+    const inb: DisplayRow[] = inboundRows.map((tx) => ({ kind: 'inbound', date: tx.created_at.slice(0, 10), tx }));
+    const out: DisplayRow[] = shipmentRows.map((ship) => ({ kind: 'shipment', date: ship.ship_date, ship }));
+    if (txTypeFilter === 'inbound') return inb;
+    if (txTypeFilter === 'outbound') return out;
+    return [...inb, ...out].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  })();
 
   // 각 트랜잭션 직후의 박스/팩 재고 잔량 계산
   // - 현재 inventory.quantity / loose_pack_qty 부터 트랜잭션을 시간 역순으로 되돌려가며 계산
@@ -539,7 +648,7 @@ export default function InventoryPage() {
         <div className="px-4 py-3 border-b border-gray-200 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="font-semibold text-gray-700 text-sm">입출고 이력</h3>
-            <span className="text-xs text-gray-500">{filteredTx.length}건</span>
+            <span className="text-xs text-gray-500">{displayRows.length}건</span>
           </div>
           {/* 기간 + 조회 */}
           <div className="flex items-center flex-wrap gap-2">
@@ -589,7 +698,7 @@ export default function InventoryPage() {
           {/* 타입 토글 + 상품 필터 */}
           <div className="flex items-center flex-wrap gap-2">
             <div className="inline-flex border border-gray-300 rounded-lg overflow-hidden">
-              {([['all', '전체'], ['inbound', '입고'], ['outbound', '출고']] as const).map(([key, label]) => (
+              {([['all', '전체'], ['inbound', '입고'], ['outbound', '출고완료']] as const).map(([key, label]) => (
                 <button
                   key={key}
                   onClick={() => setTxTypeFilter(key)}
@@ -617,44 +726,48 @@ export default function InventoryPage() {
         </div>
         {txLoading ? (
           <div className="p-8 text-center text-gray-400 text-sm">조회 중...</div>
-        ) : filteredTx.length === 0 ? (
+        ) : displayRows.length === 0 ? (
           <div className="p-8 text-center text-gray-400 text-sm">이력이 없습니다.</div>
         ) : (
           <div className="divide-y divide-gray-100">
-            {filteredTx.map((tx) => {
-              const isB2B = (tx.description || '').includes('B2B');
-              // type 기준으로 부호 결정 (DB에 B2B 출고가 양수로 저장되는 정합성 이슈 회피)
+            {displayRows.map((row) => {
+              // 출고완료 행 (주문 기준)
+              if (row.kind === 'shipment') {
+                const s = row.ship;
+                return (
+                  <div key={s.id} className="px-4 py-3 flex items-center justify-between hover:bg-gray-50">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700">출고완료</span>
+                        <span className="text-sm font-medium text-gray-800">{s.product_name}</span>
+                        {s.isB2B && (
+                          <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700">B2B</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-400 mt-0.5">{s.store} · {s.order_number}</p>
+                    </div>
+                    <div className="text-right whitespace-nowrap">
+                      <p className="font-semibold text-gray-800">-{s.qty} {s.unit === 'pack' ? '팩' : '박스'}</p>
+                      <p className="text-xs text-gray-400">{s.ship_date}</p>
+                    </div>
+                  </div>
+                );
+              }
+              // 입고 행 (트랜잭션 기준) — 잔량 표시
+              const tx = row.tx;
               const absQty = Math.abs(tx.quantity);
-              const sign =
-                tx.type === 'inbound' ? '+'
-                : tx.type === 'outbound' ? '-'
-                : (tx.quantity > 0 ? '+' : tx.quantity < 0 ? '-' : '');
               const unitLabel = tx.unit === 'pack' ? '팩' : '박스';
-              const typeLabel = tx.type === 'inbound' ? '입고' : tx.type === 'outbound' ? '출고' : '조정';
-              const typeBadgeClass =
-                tx.type === 'inbound' ? 'bg-emerald-50 text-emerald-700'
-                : tx.type === 'outbound' ? 'bg-rose-50 text-rose-700'
-                : 'bg-gray-100 text-gray-600';
               return (
                 <div key={tx.id} className="px-4 py-3 flex items-center justify-between hover:bg-gray-50">
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${typeBadgeClass}`}>
-                        {typeLabel}
-                      </span>
+                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700">입고</span>
                       <span className="text-sm font-medium text-gray-800">{getProductName(tx.product_id)}</span>
-                      {isB2B && (
-                        <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700">
-                          B2B
-                        </span>
-                      )}
                     </div>
                     {tx.description && <p className="text-xs text-gray-400 mt-0.5">{tx.description}</p>}
                   </div>
                   <div className="text-right whitespace-nowrap">
-                    <p className="font-semibold text-gray-800">
-                      {sign}{absQty} {unitLabel}
-                    </p>
+                    <p className="font-semibold text-gray-800">+{absQty} {unitLabel}</p>
                     {(() => {
                       const bal = balanceAfterMap.get(tx.id);
                       if (!bal) return null;
@@ -662,9 +775,7 @@ export default function InventoryPage() {
                       const balVal = isPackTx ? bal.pack : bal.box;
                       const balUnit = isPackTx ? '팩' : '박스';
                       return (
-                        <p className="text-xs text-gray-500">
-                          잔량 {balVal}{balUnit}
-                        </p>
+                        <p className="text-xs text-gray-500">잔량 {balVal}{balUnit}</p>
                       );
                     })()}
                     <p className="text-xs text-gray-400">
@@ -706,6 +817,11 @@ export default function InventoryPage() {
                     </button>
                   ))}
                 </div>
+                <p className="text-xs text-gray-500 mt-1.5">
+                  {txType === 'inbound'
+                    ? '※ 입고 = 실제로 받아 재고에 더하는 물량 (제조사 입고·반품 입고 등). 정산·입고탭에 집계됩니다'
+                    : 'B2B·발주 관련 수기 조정/원복은 출고·조정으로 — 입고 집계에서 제외됩니다'}
+                </p>
               </div>
 
               <div>

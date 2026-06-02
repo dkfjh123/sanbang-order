@@ -24,13 +24,28 @@ interface OrderWithItems {
   }[];
 }
 
-// 입고내역 — 전용상품만, 발주/B2B 취소 복구는 제외 (정산 대상은 산방푸드가 보낸 순수 입고만)
+// 입고내역 — 전용상품만, "수동 입고(제조사 입고)"만 집계.
+//  - source='manual_inbound' (재고관리 화면에서 사람이 '입고 등록'한 것)만 정산 대상
+//  - 발주/B2B/롤백/취소복구/조정 등 시스템·조정건은 제외
+//  - source 라벨 미부여(전환기) 행은 설명 패턴으로 fallback 판정
 interface InboundTx {
   id: string;
   product_id: string;
   quantity: number;
   description: string | null;
   created_at: string;
+  source?: string | null;
+}
+
+// 수동 입고(제조사 입고)인가? — source 우선, 없으면 설명 패턴 fallback
+function isManualInbound(tx: { source?: string | null; description: string | null }) {
+  if (tx.source === 'manual_inbound') return true;
+  if (tx.source === 'manual_adjust') return false;
+  // 전환기 fallback (031 백필 전 데이터): 시스템 자동/조정건 제외
+  const d = tx.description || '';
+  if (/^(발주|B2B|b2b)/.test(d)) return false;                              // 발주/B2B 시스템 자동
+  if (/복구|복수|조정|반품|정합|차감|회수|돼봉삼겹살/.test(d)) return false;   // 수기 조정/복구
+  return true;
 }
 
 // B2B 발주 — 신화푸드 정산 5섹션에 포함 (거래처별 region 으로 수수료율 결정)
@@ -190,16 +205,15 @@ export default function SettlementPage() {
 
     const { data: inboundData } = await supabase
       .from('inventory_transactions')
-      .select('id, product_id, quantity, description, created_at')
+      .select('id, product_id, quantity, description, created_at, source')
       .eq('type', 'inbound')
       .in('product_id', exclusiveIds.length > 0 ? exclusiveIds : ['00000000-0000-0000-0000-000000000000'])
       .gte('created_at', inboundStartKR)
       .lt('created_at', inboundEndKR)
       .order('created_at', { ascending: true });
 
-    const filteredInbound = ((inboundData as InboundTx[]) || []).filter(
-      (tx) => !(tx.description || '').includes('복구'),
-    );
+    // 수동 입고(제조사 입고)만 — 발주/B2B/롤백/조정 제외
+    const filteredInbound = ((inboundData as InboundTx[]) || []).filter(isManualInbound);
     setInbounds(filteredInbound);
 
     setLoading(false);
