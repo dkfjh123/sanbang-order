@@ -8,7 +8,11 @@
       "Bash(npm install:*)",
       "Bash(for f:*)",
       "Bash(do basename:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(node scripts/verify-dongilok-may-readonly.mjs)",
+      "Bash(node scripts/check-may-vat.mjs)",
+      "Bash(node scripts/fix-dongilok-may-vat-safe.mjs)",
+      "Bash(git check-ignore *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\dkfjh\\dev\\산방식당발주프로그램\\web\\src\\app\\statement"
