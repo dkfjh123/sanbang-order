@@ -346,54 +346,32 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   if (cancelItems) {
     for (const item of cancelItems as Array<{ product_id: string; product_name: string; quantity: number; unit: 'box' | 'pack' | null }>) {
       const unit = item.unit || 'box';
+      // 발주 취소 = 발주 생성의 거울. 공용 원자 RPC 로 행잠금 처리(재고행 없으면 조용히 스킵).
+      //  (박스) quantity 복구 + reserved 차감 / (팩) loose 복구 + reserved_pack 차감.
       if (unit === 'box') {
-        const { data: inv } = await adminSupabase
-          .from('inventory')
-          .select('quantity, reserved')
-          .eq('product_id', item.product_id)
-          .single();
-
-        if (inv) {
-          // A안: 발주 취소 = 발주 생성의 거울. quantity 복구 + reserved 차감.
-          await adminSupabase
-            .from('inventory')
-            .update({
-              quantity: inv.quantity + item.quantity,
-              reserved: Math.max(0, (inv.reserved || 0) - item.quantity),
-            })
-            .eq('product_id', item.product_id);
-
-          await adminSupabase
-            .from('inventory_transactions')
-            .insert({
-              product_id: item.product_id,
-              type: 'inbound',
-              quantity: item.quantity,
-              description: `발주 취소 복구 (${order.order_number})`,
-              created_by: user.id,
-            });
-        }
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: item.product_id,
+          p_d_quantity: item.quantity,
+          p_d_reserved: -item.quantity,
+          p_tx_type: 'inbound',
+          p_tx_quantity: item.quantity,
+          p_tx_unit: 'box',
+          p_tx_description: `발주 취소 복구 (${order.order_number})`,
+          p_actor: user.id,
+          p_require_exist: false,
+        });
       } else {
-        // 단순화 옵션: 팩 취소 복구 = loose_pack_qty 복구 + reserved_pack 차감. 박스 승격 안 함.
-        const { data: inv } = await adminSupabase
-          .from('inventory')
-          .select('loose_pack_qty, reserved_pack')
-          .eq('product_id', item.product_id)
-          .single();
-        if (inv) {
-          await adminSupabase.from('inventory').update({
-            loose_pack_qty: (inv.loose_pack_qty || 0) + item.quantity,
-            reserved_pack:  Math.max(0, (inv.reserved_pack || 0) - item.quantity),
-          }).eq('product_id', item.product_id);
-          await adminSupabase.from('inventory_transactions').insert({
-            product_id: item.product_id,
-            type: 'inbound',
-            quantity: item.quantity,
-            unit: 'pack',
-            description: `발주 취소 복구 (${order.order_number}) · 낱팩`,
-            created_by: user.id,
-          });
-        }
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: item.product_id,
+          p_d_loose_pack: item.quantity,
+          p_d_reserved_pack: -item.quantity,
+          p_tx_type: 'inbound',
+          p_tx_quantity: item.quantity,
+          p_tx_unit: 'pack',
+          p_tx_description: `발주 취소 복구 (${order.order_number}) · 낱팩`,
+          p_actor: user.id,
+          p_require_exist: false,
+        });
       }
     }
   }
@@ -479,37 +457,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (shipItems) {
     for (const it of shipItems as Array<{ product_id: string; quantity: number; unit: 'box' | 'pack' | null }>) {
       const unit = it.unit || 'box';
+      // 출고완료 = (박스) reserved↓ + on_hand↓ / (팩) reserved_pack↓ + on_hand_pack↓. quantity 불변.
+      // 트랜잭션은 발주 시점에 이미 기록됨 → 여기선 재고 카운트만 (p_tx_type 생략).
+      // 공용 원자 RPC 로 행잠금 처리(재고행 없으면 조용히 스킵).
       if (unit === 'box') {
-        const { data: inv } = await adminSupabase
-          .from('inventory')
-          .select('reserved, on_hand')
-          .eq('product_id', it.product_id)
-          .single();
-        if (inv) {
-          await adminSupabase
-            .from('inventory')
-            .update({
-              reserved: Math.max(0, (inv.reserved || 0) - it.quantity),
-              on_hand:  Math.max(0, (inv.on_hand  || 0) - it.quantity),
-            })
-            .eq('product_id', it.product_id);
-        }
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: it.product_id,
+          p_d_reserved: -it.quantity,
+          p_d_on_hand: -it.quantity,
+          p_actor: user.id,
+          p_require_exist: false,
+        });
       } else {
-        // 팩 단위 출고완료 — reserved_pack / on_hand_pack 차감
-        const { data: inv } = await adminSupabase
-          .from('inventory')
-          .select('reserved_pack, on_hand_pack')
-          .eq('product_id', it.product_id)
-          .single();
-        if (inv) {
-          await adminSupabase
-            .from('inventory')
-            .update({
-              reserved_pack: Math.max(0, (inv.reserved_pack || 0) - it.quantity),
-              on_hand_pack:  Math.max(0, (inv.on_hand_pack  || 0) - it.quantity),
-            })
-            .eq('product_id', it.product_id);
-        }
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: it.product_id,
+          p_d_reserved_pack: -it.quantity,
+          p_d_on_hand_pack: -it.quantity,
+          p_actor: user.id,
+          p_require_exist: false,
+        });
       }
     }
   }

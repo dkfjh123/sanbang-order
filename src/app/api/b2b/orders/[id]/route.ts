@@ -92,49 +92,39 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const applied: Array<{ product_id: string; box: number; loosePackAdd: number }> = [];
     let shipError: string | null = null;
     for (const [pid, d] of deltaByProduct) {
-      const { data: inv } = await adminSupabase
-        .from('inventory')
-        .select('reserved, on_hand, loose_pack_qty, on_hand_pack')
-        .eq('product_id', pid)
-        .single();
-      if (!inv) continue;
-      const { error: updErr } = await adminSupabase
-        .from('inventory')
-        .update({
-          reserved:       Math.max(0, (inv.reserved      || 0) - d.box),
-          on_hand:        Math.max(0, (inv.on_hand       || 0) - d.box),
-          loose_pack_qty: (inv.loose_pack_qty || 0) + d.loosePackAdd,
-          on_hand_pack:   (inv.on_hand_pack   || 0) + d.loosePackAdd,
-        })
-        .eq('product_id', pid);
-      if (updErr) { shipError = updErr.message; break; }
-
-      if (d.loosePackAdd > 0) {
-        await adminSupabase.from('inventory_transactions').insert({
-          product_id: pid,
-          type: 'adjustment',
-          quantity: d.loosePackAdd,
-          unit: 'pack',
-          description: `B2B 출고 자투리 (${order.order_number}) — 박스 분해 후 가맹점 판매분 +${d.loosePackAdd}팩`,
-          created_by: user.id,
-        });
-      }
-
+      // B2B 출고 = reserved↓ + on_hand↓ (박스 환산) + 자투리 loose_pack_qty↑ + on_hand_pack↑.
+      // 공용 원자 RPC(행잠금 + 음수가드). 자투리 발생 시에만 트랜잭션 기록.
+      const { error: rpcErr } = await adminSupabase.rpc('apply_inventory_delta', {
+        p_product_id: pid,
+        p_d_reserved: -d.box,
+        p_d_on_hand: -d.box,
+        p_d_loose_pack: d.loosePackAdd,
+        p_d_on_hand_pack: d.loosePackAdd,
+        p_tx_type: d.loosePackAdd > 0 ? 'adjustment' : null,
+        p_tx_quantity: d.loosePackAdd > 0 ? d.loosePackAdd : null,
+        p_tx_unit: 'pack',
+        p_tx_description: d.loosePackAdd > 0
+          ? `B2B 출고 자투리 (${order.order_number}) — 박스 분해 후 가맹점 판매분 +${d.loosePackAdd}팩`
+          : null,
+        p_actor: user.id,
+        p_require_exist: false,
+      });
+      if (rpcErr) { shipError = rpcErr.message; break; }
       applied.push({ product_id: pid, box: d.box, loosePackAdd: d.loosePackAdd });
     }
 
     if (shipError) {
       for (const a of applied) {
-        const { data: cur } = await adminSupabase
-          .from('inventory').select('reserved, on_hand, loose_pack_qty, on_hand_pack').eq('product_id', a.product_id).single();
-        if (cur) {
-          await adminSupabase.from('inventory').update({
-            reserved:       (cur.reserved      || 0) + a.box,
-            on_hand:        (cur.on_hand       || 0) + a.box,
-            loose_pack_qty: Math.max(0, (cur.loose_pack_qty || 0) - a.loosePackAdd),
-            on_hand_pack:   Math.max(0, (cur.on_hand_pack   || 0) - a.loosePackAdd),
-          }).eq('product_id', a.product_id);
-        }
+        // 거울 롤백
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: a.product_id,
+          p_d_reserved: a.box,
+          p_d_on_hand: a.box,
+          p_d_loose_pack: -a.loosePackAdd,
+          p_d_on_hand_pack: -a.loosePackAdd,
+          p_actor: user.id,
+          p_require_exist: false,
+        });
       }
       return NextResponse.json({ error: `재고 차감 실패: ${shipError}` }, { status: 400 });
     }
@@ -202,43 +192,35 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     const wasShipped = order.status === 'shipped';
     for (const [pid, d] of deltaByProduct) {
-      const { data: inv } = await adminSupabase
-        .from('inventory')
-        .select('quantity, reserved, on_hand, loose_pack_qty, on_hand_pack')
-        .eq('product_id', pid)
-        .single();
-      if (!inv) continue;
-
+      // 공용 원자 RPC(행잠금). 재고행 없으면 조용히 스킵.
       if (wasShipped) {
-        // 반품: 박스 창고로 회수, 자투리도 회수
-        await adminSupabase.from('inventory').update({
-          quantity:       (inv.quantity      || 0) + d.box,
-          on_hand:        (inv.on_hand       || 0) + d.box,
-          loose_pack_qty: Math.max(0, (inv.loose_pack_qty || 0) - d.loosePackAdd),
-          on_hand_pack:   Math.max(0, (inv.on_hand_pack   || 0) - d.loosePackAdd),
-        }).eq('product_id', pid);
-        await adminSupabase.from('inventory_transactions').insert({
-          product_id: pid,
-          type: 'inbound',
-          quantity: d.box,
-          unit: 'box',
-          description: `B2B 출고취소 반품 (${order.order_number}) — 박스 환산 ${d.box}박스`
+        // 반품: 박스 창고로 회수(quantity↑ on_hand↑) + 자투리 회수(loose↓ on_hand_pack↓)
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: pid,
+          p_d_quantity: d.box,
+          p_d_on_hand: d.box,
+          p_d_loose_pack: -d.loosePackAdd,
+          p_d_on_hand_pack: -d.loosePackAdd,
+          p_tx_type: 'inbound',
+          p_tx_quantity: d.box,
+          p_tx_unit: 'box',
+          p_tx_description: `B2B 출고취소 반품 (${order.order_number}) — 박스 환산 ${d.box}박스`
             + (d.loosePackAdd > 0 ? ` + 자투리 ${d.loosePackAdd}팩 회수` : ''),
-          created_by: user.id,
+          p_actor: user.id,
+          p_require_exist: false,
         });
       } else {
-        // pending → cancelled: POST 거울
-        await adminSupabase.from('inventory').update({
-          quantity: (inv.quantity || 0) + d.box,
-          reserved: Math.max(0, (inv.reserved || 0) - d.box),
-        }).eq('product_id', pid);
-        await adminSupabase.from('inventory_transactions').insert({
-          product_id: pid,
-          type: 'inbound',
-          quantity: d.box,
-          unit: 'box',
-          description: `B2B 발주 취소 (${order.order_number}) — 박스 환산 ${d.box}박스 복구`,
-          created_by: user.id,
+        // pending → cancelled: POST 거울 (quantity↑ reserved↓)
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: pid,
+          p_d_quantity: d.box,
+          p_d_reserved: -d.box,
+          p_tx_type: 'inbound',
+          p_tx_quantity: d.box,
+          p_tx_unit: 'box',
+          p_tx_description: `B2B 발주 취소 (${order.order_number}) — 박스 환산 ${d.box}박스 복구`,
+          p_actor: user.id,
+          p_require_exist: false,
         });
       }
     }
@@ -341,22 +323,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       }));
       await adminSupabase.from('b2b_order_items').insert(toInsert);
 
-      // inventory diff 반영
+      // inventory diff 반영 — quantity는 -diff, reserved는 +diff (등식 유지). 공용 원자 RPC.
       for (const d of diffs) {
-        const { data: inv } = await adminSupabase
-          .from('inventory').select('quantity, reserved').eq('product_id', d.product_id).single();
-        if (!inv) continue;
-        await adminSupabase.from('inventory').update({
-          quantity: (inv.quantity || 0) - d.diff,
-          reserved: d.diff > 0 ? (inv.reserved || 0) + d.diff : Math.max(0, (inv.reserved || 0) + d.diff),
-        }).eq('product_id', d.product_id);
-        await adminSupabase.from('inventory_transactions').insert({
-          product_id: d.product_id,
-          type: d.diff > 0 ? 'outbound' : 'inbound',
-          quantity: d.diff > 0 ? -d.diff : -d.diff,
-          unit: 'box',
-          description: `B2B 발주 수정 (${order.order_number}) — diff ${d.diff > 0 ? '+' : ''}${d.diff}박스`,
-          created_by: user.id,
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: d.product_id,
+          p_d_quantity: -d.diff,
+          p_d_reserved: d.diff,
+          p_tx_type: d.diff > 0 ? 'outbound' : 'inbound',
+          p_tx_quantity: -d.diff,
+          p_tx_unit: 'box',
+          p_tx_description: `B2B 발주 수정 (${order.order_number}) — diff ${d.diff > 0 ? '+' : ''}${d.diff}박스`,
+          p_actor: user.id,
+          p_require_exist: false,
         });
       }
 
@@ -434,20 +412,17 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   }
 
   for (const [pid, box] of boxByPid) {
-    const { data: inv } = await adminSupabase
-      .from('inventory').select('quantity, reserved').eq('product_id', pid).single();
-    if (!inv) continue;
-    await adminSupabase.from('inventory').update({
-      quantity: (inv.quantity || 0) + box,
-      reserved: Math.max(0, (inv.reserved || 0) - box),
-    }).eq('product_id', pid);
-    await adminSupabase.from('inventory_transactions').insert({
-      product_id: pid,
-      type: 'inbound',
-      quantity: box,
-      unit: 'box',
-      description: `B2B 발주 삭제 (${order.order_number}) — 박스 환산 ${box}박스 복구`,
-      created_by: user.id,
+    // POST 거울 (quantity↑ reserved↓). 공용 원자 RPC(행잠금). 재고행 없으면 조용히 스킵.
+    await adminSupabase.rpc('apply_inventory_delta', {
+      p_product_id: pid,
+      p_d_quantity: box,
+      p_d_reserved: -box,
+      p_tx_type: 'inbound',
+      p_tx_quantity: box,
+      p_tx_unit: 'box',
+      p_tx_description: `B2B 발주 삭제 (${order.order_number}) — 박스 환산 ${box}박스 복구`,
+      p_actor: user.id,
+      p_require_exist: false,
     });
   }
 

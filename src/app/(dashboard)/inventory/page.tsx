@@ -292,54 +292,28 @@ export default function InventoryPage() {
     setError('');
 
     const qty = Number(txQty);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
     const item = items.find((i) => i.product_id === selectedProduct);
     if (!item) { setError('상품을 찾을 수 없습니다.'); setSaving(false); return; }
 
-    const change = txType === 'outbound' ? -qty : qty;
-    const newQty = item.quantity + change;
-    // A안: 입고/출고/조정은 reserved와 무관 → on_hand 도 quantity 와 같은 폭으로 변함
-    const newOnHand = (item.on_hand || 0) + change;
-
-    if (newQty < 0) {
-      setError('재고가 부족합니다.');
-      setSaving(false);
-      return;
-    }
-    if (newOnHand < 0) {
-      setError('총재고가 음수가 됩니다. 입력 수량을 확인하세요.');
-      setSaving(false);
-      return;
-    }
-
-    // 재고 레코드가 없으면 생성 (virtual 아이템) — 새 행은 reserved=0 이므로 on_hand=quantity
-    const isVirtual = item.id.startsWith('virtual-');
-    if (isVirtual) {
-      const { error: insertErr } = await supabase
-        .from('inventory')
-        .insert({ product_id: selectedProduct, quantity: newQty, on_hand: newQty });
-      if (insertErr) { setError(insertErr.message); setSaving(false); return; }
-    } else {
-      const { error: updateErr } = await supabase
-        .from('inventory')
-        .update({ quantity: newQty, on_hand: newOnHand })
-        .eq('product_id', selectedProduct);
-      if (updateErr) { setError(updateErr.message); setSaving(false); return; }
-    }
-
-    // 이력 기록
-    //  - source: '입고' = manual_inbound(제조사 입고, 정산/입고탭 집계 대상)
-    //            '출고'·'조정' = manual_adjust (입고에서 제외)
-    await supabase.from('inventory_transactions').insert({
-      product_id: selectedProduct,
-      type: txType,
-      quantity: change,
-      description: txDesc || `${txType === 'inbound' ? '입고' : txType === 'outbound' ? '출고' : '조정'}`,
-      source: txType === 'inbound' ? 'manual_inbound' : 'manual_adjust',
-      created_by: user.id,
+    // 입출고는 서버 API(/api/inventory/adjust)에서 공용 원자 RPC 로 처리.
+    // 클라이언트 직접 update 를 없애 lost update(동시성 덮어쓰기)를 차단한다.
+    const res = await fetch('/api/inventory/adjust', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        product_id: selectedProduct,
+        type: txType,
+        quantity: qty,
+        description: txDesc || undefined,
+      }),
     });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setError(j.error || '입출고 처리에 실패했습니다.');
+      setSaving(false);
+      return;
+    }
 
     setSaving(false);
     setShowModal(false);

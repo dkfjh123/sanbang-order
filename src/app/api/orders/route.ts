@@ -243,37 +243,37 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: itemsError.message }, { status: 400 });
   }
 
-  // 재고 차감
-  const appliedBox: Array<{ product_id: string; quantity: number }> = [];
-  const appliedPack: Array<{ product_id: string; quantity: number }> = [];
+  // 재고 차감 — 공용 원자 RPC(apply_inventory_delta) 사용.
+  // FOR UPDATE 행잠금으로 동시 요청의 lost update(덮어쓰기)를 원천 차단하고,
+  // 음수 가드도 RPC 안에서 원자적으로 처리한다(재고 부족 시 RPC 가 에러 반환).
+  const applied: Array<{ product_id: string; unit: 'box' | 'pack'; quantity: number }> = [];
 
   const rollbackAll = async () => {
-    for (const a of appliedBox) {
-      const { data: cur } = await adminSupabase
-        .from('inventory').select('quantity, reserved').eq('product_id', a.product_id).single();
-      if (cur) {
-        // A안: quantity 복구 + reserved 도 같이 차감 (둘 다 거울처럼)
-        await adminSupabase.from('inventory')
-          .update({
-            quantity: cur.quantity + a.quantity,
-            reserved: Math.max(0, (cur.reserved || 0) - a.quantity),
-          })
-          .eq('product_id', a.product_id);
-        await adminSupabase.from('inventory_transactions').insert({
-          product_id: a.product_id, type: 'inbound', quantity: a.quantity,
-          description: `발주 실패 롤백 (${orderNumber})`, created_by: user.id,
+    for (const a of applied) {
+      if (a.unit === 'box') {
+        // 박스 발주의 거울: quantity 복구 + reserved 차감
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: a.product_id,
+          p_d_quantity: a.quantity,
+          p_d_reserved: -a.quantity,
+          p_tx_type: 'inbound',
+          p_tx_quantity: a.quantity,
+          p_tx_unit: 'box',
+          p_tx_description: `발주 실패 롤백 (${orderNumber})`,
+          p_actor: user.id,
         });
-      }
-    }
-    for (const a of appliedPack) {
-      const { data: cur } = await adminSupabase
-        .from('inventory').select('loose_pack_qty, reserved_pack').eq('product_id', a.product_id).single();
-      if (cur) {
-        // 단순화 옵션: 가맹점 팩 롤백 = loose 복구 + reserved_pack 차감
-        await adminSupabase.from('inventory').update({
-          loose_pack_qty: (cur.loose_pack_qty || 0) + a.quantity,
-          reserved_pack:  Math.max(0, (cur.reserved_pack || 0) - a.quantity),
-        }).eq('product_id', a.product_id);
+      } else {
+        // 단순화 옵션: 팩 발주의 거울 = loose 복구 + reserved_pack 차감
+        await adminSupabase.rpc('apply_inventory_delta', {
+          p_product_id: a.product_id,
+          p_d_loose_pack: a.quantity,
+          p_d_reserved_pack: -a.quantity,
+          p_tx_type: 'inbound',
+          p_tx_quantity: a.quantity,
+          p_tx_unit: 'pack',
+          p_tx_description: `발주 실패 롤백 (${orderNumber}) · 낱팩`,
+          p_actor: user.id,
+        });
       }
     }
   };
@@ -284,65 +284,40 @@ export async function POST(request: Request) {
       const inv = inventoryData.find((i: { product_id: string }) => i.product_id === item.product_id);
       if (!inv) continue;
 
-      if (unit === 'box') {
-        const newQty = inv.quantity - item.quantity;
-        // A안: 발주 시점에는 매장주문가능(quantity)을 줄이고 나갈것들(reserved)에 같은 양 추가.
-        // on_hand 는 안 건드림 (실제 출고는 신화가 출고완료 누를 때).
-        await adminSupabase
-          .from('inventory')
-          .update({
-            quantity: newQty,
-            reserved: (inv.reserved || 0) + item.quantity,
+      // A안: 박스 발주 = 매장주문가능(quantity)↓ + 나갈것들(reserved)↑, on_hand 불변.
+      // 단순화 옵션: 팩 발주 = 자투리(loose_pack_qty)↓ + reserved_pack↑, 박스 분해 안 함.
+      const { error: rpcErr } = unit === 'box'
+        ? await adminSupabase.rpc('apply_inventory_delta', {
+            p_product_id: item.product_id,
+            p_d_quantity: -item.quantity,
+            p_d_reserved: item.quantity,
+            p_tx_type: 'outbound',
+            p_tx_quantity: -item.quantity,
+            p_tx_unit: 'box',
+            p_tx_description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name}`,
+            p_actor: user.id,
           })
-          .eq('product_id', item.product_id);
-
-        await adminSupabase
-          .from('inventory_transactions')
-          .insert({
-            product_id: item.product_id,
-            type: 'outbound',
-            quantity: -item.quantity,
-            description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name}`,
-            created_by: user.id,
+        : await adminSupabase.rpc('apply_inventory_delta', {
+            p_product_id: item.product_id,
+            p_d_loose_pack: -item.quantity,
+            p_d_reserved_pack: item.quantity,
+            p_tx_type: 'outbound',
+            p_tx_quantity: -item.quantity,
+            p_tx_unit: 'pack',
+            p_tx_description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name} · 낱팩`,
+            p_actor: user.id,
           });
-        appliedBox.push({ product_id: item.product_id, quantity: item.quantity });
-      } else {
-        // 단순화 옵션: 가맹점 팩 발주 = 자투리(loose_pack_qty)에서만 차감 + reserved_pack 가산.
-        //              박스 분해 안 함. 부족하면 사전 검증에서 이미 거부됐어야 함.
-        const { data: invCur } = await adminSupabase
-          .from('inventory')
-          .select('loose_pack_qty, reserved_pack')
-          .eq('product_id', item.product_id)
-          .single();
-        if (!invCur || invCur.loose_pack_qty < item.quantity) {
-          await rollbackAll();
-          await adminSupabase.from('orders').delete().eq('id', order.id);
-          return NextResponse.json({
-            error: `${item.product_name} 낱팩 재고 부족 (자투리: ${invCur?.loose_pack_qty ?? 0}팩)`,
-          }, { status: 400 });
-        }
-        const { error: updErr } = await adminSupabase
-          .from('inventory')
-          .update({
-            loose_pack_qty: invCur.loose_pack_qty - item.quantity,
-            reserved_pack:  (invCur.reserved_pack || 0) + item.quantity,
-          })
-          .eq('product_id', item.product_id);
-        if (updErr) {
-          await rollbackAll();
-          await adminSupabase.from('orders').delete().eq('id', order.id);
-          return NextResponse.json({ error: `낱팩 차감 실패: ${updErr.message}` }, { status: 400 });
-        }
-        await adminSupabase.from('inventory_transactions').insert({
-          product_id: item.product_id,
-          type: 'outbound',
-          quantity: -item.quantity,
-          unit: 'pack',
-          description: `발주 출고 (${orderNumber}) - ${store.short_name || store.name} · 낱팩`,
-          created_by: user.id,
-        });
-        appliedPack.push({ product_id: item.product_id, quantity: item.quantity });
+
+      if (rpcErr) {
+        await rollbackAll();
+        await adminSupabase.from('orders').delete().eq('id', order.id);
+        return NextResponse.json({
+          error: unit === 'box'
+            ? `${item.product_name} 재고 차감 실패: ${rpcErr.message}`
+            : `${item.product_name} 낱팩 차감 실패: ${rpcErr.message}`,
+        }, { status: 400 });
       }
+      applied.push({ product_id: item.product_id, unit, quantity: item.quantity });
     }
   }
 

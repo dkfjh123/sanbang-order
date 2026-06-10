@@ -242,48 +242,39 @@ export async function POST(request: Request) {
     }
   }
 
-  // inventory 갱신 + outbound 기록 (실패 시 롤백)
+  // inventory 갱신 + outbound 기록 (실패 시 롤백) — 공용 원자 RPC(행잠금 + 음수가드)
   const applied: Array<{ product_id: string; box: number }> = [];
   let inventoryError: string | null = null;
   for (const [pid, d] of deltaByProduct) {
-    const { data: inv } = await adminSupabase
-      .from('inventory')
-      .select('quantity, reserved')
-      .eq('product_id', pid)
-      .single();
-    if (!inv) continue;
-    const { error: updErr } = await adminSupabase
-      .from('inventory')
-      .update({
-        quantity: inv.quantity - d.box,
-        reserved: (inv.reserved || 0) + d.box,
-      })
-      .eq('product_id', pid);
-    if (updErr) { inventoryError = updErr.message; break; }
-
-    await adminSupabase.from('inventory_transactions').insert({
-      product_id: pid,
-      type: 'outbound',
-      quantity: -d.box,
-      unit: 'box',
-      description: `B2B 발주 등록 (${orderNumber}) — 박스 환산 ${d.box}박스`,
-      created_by: user.id,
+    // B2B 발주 등록 = quantity↓ + reserved↑ (박스 환산).
+    const { error: rpcErr } = await adminSupabase.rpc('apply_inventory_delta', {
+      p_product_id: pid,
+      p_d_quantity: -d.box,
+      p_d_reserved: d.box,
+      p_tx_type: 'outbound',
+      p_tx_quantity: -d.box,
+      p_tx_unit: 'box',
+      p_tx_description: `B2B 발주 등록 (${orderNumber}) — 박스 환산 ${d.box}박스`,
+      p_actor: user.id,
     });
+    if (rpcErr) { inventoryError = rpcErr.message; break; }
     applied.push({ product_id: pid, box: d.box });
   }
 
   if (inventoryError) {
     for (const a of applied) {
-      const { data: cur } = await adminSupabase
-        .from('inventory').select('quantity, reserved').eq('product_id', a.product_id).single();
-      if (cur) {
-        await adminSupabase.from('inventory')
-          .update({
-            quantity: cur.quantity + a.box,
-            reserved: Math.max(0, (cur.reserved || 0) - a.box),
-          })
-          .eq('product_id', a.product_id);
-      }
+      // 거울 롤백: quantity 복구 + reserved 차감
+      await adminSupabase.rpc('apply_inventory_delta', {
+        p_product_id: a.product_id,
+        p_d_quantity: a.box,
+        p_d_reserved: -a.box,
+        p_tx_type: 'inbound',
+        p_tx_quantity: a.box,
+        p_tx_unit: 'box',
+        p_tx_description: `B2B 발주 등록 롤백 (${orderNumber})`,
+        p_actor: user.id,
+        p_require_exist: false,
+      });
     }
     await adminSupabase.from('b2b_order_items').delete().eq('order_id', order.id);
     await adminSupabase.from('b2b_orders').delete().eq('id', order.id);
