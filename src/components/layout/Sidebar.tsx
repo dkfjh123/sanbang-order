@@ -44,6 +44,7 @@ export default function Sidebar({
     admin: '관리자',
     store: '가맹점',
     shinwa: '신화푸드',
+    b2b: 'B2B 거래처',
   }[profile.role];
 
   return (

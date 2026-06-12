@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'store' | 'shinwa';
+export type UserRole = 'admin' | 'store' | 'shinwa' | 'b2b';
 
 export interface Profile {
   id: string;
@@ -6,6 +6,7 @@ export interface Profile {
   name: string;
   role: UserRole;
   store_id: string | null;
+  b2b_customer_id: string | null; // b2b 역할 전용 — 연결된 B2B 거래처
   created_at: string;
 }
 
@@ -60,7 +61,10 @@ export interface MenuItem {
   storeReadOnly?: boolean; // 가맹점은 조회만
 }
 
-// B2B (아워홈 등 대기업 거래처) — 가맹점/예치금 시스템과 완전히 분리
+// B2B (아워홈 등 대기업 거래처)
+//  - 기본은 후불(is_prepaid=false) — 가맹점/예치금 시스템과 분리
+//  - 선입금 거래처(돼봉삼겹살, is_prepaid=true)는 B2B 전용 예치금
+//    (deposit_balance + b2b_deposit_transactions)에서 발주 시점 차감 (036)
 export type B2bRegion = 'jeju' | 'seoul';
 
 export interface B2bCustomer {
@@ -74,8 +78,38 @@ export interface B2bCustomer {
   memo: string | null;
   region: B2bRegion;
   is_active: boolean;
+  deposit_balance: number;   // B2B 예치금 잔액 (선입금 거래처만 사용)
+  is_prepaid: boolean;       // true = 선입금(발주 시 예치금 차감), false = 후불
+  min_order_amount: number;  // 최소발주금액. 0 = 제한 없음 (돼봉 150,000)
   created_at: string;
   updated_at: string;
+}
+
+export type B2bDepositTransactionType = 'deposit' | 'order_deduct' | 'order_refund' | 'adjustment' | 'withdrawal';
+
+export interface B2bDepositTransaction {
+  id: string;
+  b2b_customer_id: string;
+  type: B2bDepositTransactionType;
+  amount: number;          // 부호 포함: 차감/출금 음수, 충전/환불 양수
+  balance_after: number;
+  description: string | null;
+  b2b_order_id: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface B2bDepositRequest {
+  id: string;
+  b2b_customer_id: string;
+  amount: number;
+  status: DepositRequestStatus;
+  description: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  b2b_customers?: { name: string };
 }
 
 export type B2bOrderStatus = 'pending' | 'confirmed' | 'shipped' | 'cancelled';

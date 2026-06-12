@@ -1,11 +1,24 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
+
+// 이 주문에서 예치금으로 결제되고 아직 환불되지 않은 금액 (선입금 거래처용)
+//  - order_deduct(음수) / adjustment(±) / order_refund(양수) 를 모두 합산해 부호 반전
+//  - 선입금 전환 이전의 후불 주문은 원장에 행이 없으므로 0 → 환불 안 함 (소급 오환불 방지)
+async function getNetPaid(adminSupabase: SupabaseClient, orderId: string): Promise<number> {
+  const { data } = await adminSupabase
+    .from('b2b_deposit_transactions')
+    .select('amount')
+    .eq('b2b_order_id', orderId);
+  return (data || []).reduce((sum: number, tx: { amount: number }) => sum - tx.amount, 0);
+}
 
 // PATCH: action = 'ship' | 'cancel' | 'update'
 //  - ship   : pending → shipped, 재고 차감 (apply_b2b_inventory_delta, 양수)
 //  - cancel : shipped/pending → cancelled, shipped였다면 재고 복구 (음수)
-//  - update : pending 상태에서만 items/memo/ship_date 수정 가능
+//             선입금 주문이면 결제액 자동 환불 (b2b 역할은 자기 pending 주문만 취소 가능)
+//  - update : pending 상태에서만 items/memo/ship_date 수정 가능 (admin 전용)
+//             선입금 주문이면 금액 차액을 예치금에 반영
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const serverSupabase = await createServerClient();
@@ -22,12 +35,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   const { data: profile } = await adminSupabase
     .from('profiles')
-    .select('role, name')
+    .select('role, name, b2b_customer_id')
     .eq('id', user.id)
     .single();
 
   const role = profile?.role;
-  if (role !== 'admin' && role !== 'shinwa') {
+  if (role !== 'admin' && role !== 'shinwa' && role !== 'b2b') {
     return NextResponse.json({ error: '권한이 없습니다.' }, { status: 403 });
   }
 
@@ -39,6 +52,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: '신화푸드는 출고 처리만 가능합니다.' }, { status: 403 });
   }
 
+  // b2b 거래처는 취소만 가능 (수정은 본사가 단가 검증 포함해서 처리)
+  if (role === 'b2b' && action !== 'cancel') {
+    return NextResponse.json({ error: '거래처는 주문 취소만 가능합니다. 수정은 본사에 문의해주세요.' }, { status: 403 });
+  }
+
   const { data: order } = await adminSupabase
     .from('b2b_orders')
     .select('*')
@@ -47,6 +65,16 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   if (!order) {
     return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
+  }
+
+  // b2b 거래처: 자기 주문 + 출고 전(pending)만 직접 취소 가능
+  if (role === 'b2b') {
+    if (!profile?.b2b_customer_id || order.b2b_customer_id !== profile.b2b_customer_id) {
+      return NextResponse.json({ error: '본인 거래처의 주문만 취소할 수 있습니다.' }, { status: 403 });
+    }
+    if (order.status !== 'pending') {
+      return NextResponse.json({ error: '출고 전(대기) 주문만 직접 취소할 수 있습니다. 출고된 주문은 본사에 문의해주세요.' }, { status: 400 });
+    }
   }
 
   const { data: items } = await adminSupabase
@@ -227,10 +255,29 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
     await adminSupabase.from('b2b_orders').update({ status: 'cancelled' }).eq('id', id);
 
+    // 선입금 주문: 결제액 자동 환불 (원장에 차감 기록이 있는 주문만 — 과거 후불 주문 오환불 방지)
+    const netPaid = await getNetPaid(adminSupabase, id);
+    if (netPaid > 0) {
+      const { error: refundError } = await adminSupabase.rpc('apply_b2b_deposit_delta', {
+        p_customer_id: order.b2b_customer_id,
+        p_type: 'order_refund',
+        p_amount: netPaid,
+        p_description: `발주 취소 환불 (${order.order_number})`,
+        p_order_id: id,
+        p_actor: user.id,
+      });
+      if (refundError) {
+        return NextResponse.json({
+          error: `취소는 완료됐으나 예치금 환불에 실패했습니다. 본사 확인 필요: ${refundError.message}`,
+        }, { status: 500 });
+      }
+    }
+
     await adminSupabase.from('b2b_order_logs').insert({
       order_id: id,
       action: 'cancel',
-      description: wasShipped ? '출고취소 반품 (재고/자투리 회수)' : '발주 취소 (reserved 복구)',
+      description: (wasShipped ? '출고취소 반품 (재고/자투리 회수)' : '발주 취소 (reserved 복구)')
+        + (netPaid > 0 ? ` — 예치금 ₩${netPaid.toLocaleString()} 환불` : ''),
       ...logActor,
     });
 
@@ -303,10 +350,28 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         }
       }
 
-      // items 갱신
       const total_amount = newItems.reduce((s, i) => s + i.unit_price_with_tax * i.quantity, 0);
       const total_amount_ex_tax = newItems.reduce((s, i) => s + i.unit_price * i.quantity, 0);
 
+      // 선입금 주문: 금액 차액을 예치금에 먼저 반영 (증가분은 RPC가 행잠금으로 잔액 가드)
+      //  - 실패(잔액 부족 등) 시 items/재고를 건드리기 전에 중단 → 주문 원형 유지
+      const amountDiff = total_amount - order.total_amount;
+      const netPaid = await getNetPaid(adminSupabase, id);
+      if (amountDiff !== 0 && netPaid > 0) {
+        const { error: adjustError } = await adminSupabase.rpc('apply_b2b_deposit_delta', {
+          p_customer_id: order.b2b_customer_id,
+          p_type: 'adjustment',
+          p_amount: -amountDiff,
+          p_description: `발주 수정 차액 (${order.order_number}) ${amountDiff > 0 ? '추가 차감' : '부분 환불'} ₩${Math.abs(amountDiff).toLocaleString()}`,
+          p_order_id: id,
+          p_actor: user.id,
+        });
+        if (adjustError) {
+          return NextResponse.json({ error: `예치금 차액 처리 실패: ${adjustError.message}` }, { status: 400 });
+        }
+      }
+
+      // items 갱신
       await adminSupabase.from('b2b_order_items').delete().eq('order_id', id);
       const toInsert = newItems.map((i) => ({
         order_id: id,
@@ -395,6 +460,19 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   }
   if (order.status !== 'pending') {
     return NextResponse.json({ error: '대기 상태 주문만 삭제 가능합니다. 출고된 주문은 취소를 사용하세요.' }, { status: 400 });
+  }
+
+  // 선입금 주문(예치금 원장 기록 보유)은 삭제 불가 — 취소를 쓰면 자동 환불 + 이력 보존
+  //  (원장이 주문을 참조(FK)하므로 삭제 자체도 막힘)
+  const { count: txCount } = await adminSupabase
+    .from('b2b_deposit_transactions')
+    .select('id', { count: 'exact', head: true })
+    .eq('b2b_order_id', id);
+
+  if ((txCount ?? 0) > 0) {
+    return NextResponse.json({
+      error: '예치금이 차감된 주문은 삭제할 수 없습니다. "취소"를 사용하면 자동으로 환불됩니다.',
+    }, { status: 400 });
   }
 
   // 박스 환산만큼 재고 복구 (POST 거울)

@@ -54,25 +54,42 @@ export async function POST(request: Request) {
 
   const { data: profile } = await adminSupabase
     .from('profiles')
-    .select('role, name')
+    .select('role, name, b2b_customer_id')
     .eq('id', user.id)
     .single();
 
-  if (profile?.role !== 'admin') {
-    return NextResponse.json({ error: 'B2B 발주는 관리자만 처리할 수 있습니다.' }, { status: 403 });
+  const role = profile?.role;
+  if (role !== 'admin' && role !== 'b2b') {
+    return NextResponse.json({ error: 'B2B 발주 권한이 없습니다.' }, { status: 403 });
   }
 
   const body = await request.json();
   const { b2b_customer_id, order_date, ship_date, memo, items } = body as {
-    b2b_customer_id: string;
+    b2b_customer_id?: string;
     order_date?: string;
     ship_date?: string | null;
     memo?: string | null;
     items: IncomingItem[];
   };
 
-  if (!b2b_customer_id || !items || items.length === 0) {
+  // b2b 역할은 자기 거래처로 강제 (body 값 무시 — 타 거래처 발주 차단)
+  const customerId = role === 'b2b' ? profile?.b2b_customer_id : b2b_customer_id;
+  if (role === 'b2b' && !profile?.b2b_customer_id) {
+    return NextResponse.json({ error: '연결된 거래처가 없습니다. 본사에 문의해주세요.' }, { status: 403 });
+  }
+
+  if (!customerId || !items || items.length === 0) {
     return NextResponse.json({ error: '거래처와 발주 항목이 필요합니다.' }, { status: 400 });
+  }
+
+  const { data: customer } = await adminSupabase
+    .from('b2b_customers')
+    .select('id, name, is_active, is_prepaid, deposit_balance, min_order_amount')
+    .eq('id', customerId)
+    .single();
+
+  if (!customer || !customer.is_active) {
+    return NextResponse.json({ error: '거래처를 찾을 수 없거나 비활성 상태입니다.' }, { status: 400 });
   }
 
   for (const item of items) {
@@ -89,7 +106,7 @@ export async function POST(request: Request) {
     adminSupabase
       .from('b2b_customer_product_prices')
       .select('product_id, b2b_price, b2b_price_with_tax, available_units')
-      .eq('customer_id', b2b_customer_id)
+      .eq('customer_id', customerId)
       .eq('is_active', true)
       .in('product_id', productIds),
     adminSupabase
@@ -156,6 +173,20 @@ export async function POST(request: Request) {
   const totalAmount = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
   const totalAmountExTax = normalizedItems.reduce((sum, item) => sum + item.subtotal_ex_tax, 0);
 
+  // 최소발주금액 (주문 총액 기준 — 거래처별 설정, 가맹점 api/orders 와 동일 패턴)
+  if (customer.min_order_amount > 0 && totalAmount < customer.min_order_amount) {
+    return NextResponse.json({
+      error: `최소발주금액은 ₩${customer.min_order_amount.toLocaleString()}입니다.`,
+    }, { status: 400 });
+  }
+
+  // 선입금 거래처: 예치금 사전 확인 (실제 차감은 재고 처리 후 RPC가 행잠금으로 재검증)
+  if (customer.is_prepaid && customer.deposit_balance < totalAmount) {
+    return NextResponse.json({
+      error: `예치금이 부족합니다. 잔액: ₩${customer.deposit_balance.toLocaleString()}, 필요: ₩${totalAmount.toLocaleString()}`,
+    }, { status: 400 });
+  }
+
   const today = (order_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '');
   const { data: seqData } = await adminSupabase.rpc('nextval', { seq_name: 'b2b_order_number_seq' }).single();
   const seq = (seqData as number) || Math.floor(Math.random() * 9999);
@@ -165,7 +196,7 @@ export async function POST(request: Request) {
     .from('b2b_orders')
     .insert({
       order_number: orderNumber,
-      b2b_customer_id,
+      b2b_customer_id: customerId,
       ordered_by: user.id,
       status: 'pending',
       total_amount: totalAmount,
@@ -261,7 +292,7 @@ export async function POST(request: Request) {
     applied.push({ product_id: pid, box: d.box });
   }
 
-  if (inventoryError) {
+  const rollbackInventory = async () => {
     for (const a of applied) {
       // 거울 롤백: quantity 복구 + reserved 차감
       await adminSupabase.rpc('apply_inventory_delta', {
@@ -276,18 +307,43 @@ export async function POST(request: Request) {
         p_require_exist: false,
       });
     }
+  };
+
+  if (inventoryError) {
+    await rollbackInventory();
     await adminSupabase.from('b2b_order_items').delete().eq('order_id', order.id);
     await adminSupabase.from('b2b_orders').delete().eq('id', order.id);
     return NextResponse.json({ error: `재고 갱신 실패: ${inventoryError}` }, { status: 400 });
   }
 
+  // 선입금 거래처: 예치금 차감 (잔액 검증+차감+원장 기록을 RPC 한 트랜잭션으로 — 행잠금)
+  if (customer.is_prepaid) {
+    const { error: depositError } = await adminSupabase.rpc('apply_b2b_deposit_delta', {
+      p_customer_id: customer.id,
+      p_type: 'order_deduct',
+      p_amount: -totalAmount,
+      p_description: `발주 차감 (${orderNumber})`,
+      p_order_id: order.id,
+      p_actor: user.id,
+    });
+
+    if (depositError) {
+      // 차감 실패(동시 발주로 잔액 소진 등) → 재고/주문 전부 원복
+      await rollbackInventory();
+      await adminSupabase.from('b2b_order_items').delete().eq('order_id', order.id);
+      await adminSupabase.from('b2b_orders').delete().eq('id', order.id);
+      return NextResponse.json({ error: `예치금 차감 실패: ${depositError.message}` }, { status: 400 });
+    }
+  }
+
   await adminSupabase.from('b2b_order_logs').insert({
     order_id: order.id,
     action: 'create',
-    description: `${orderItems.length}개 품목 등록 (합계 ₩${totalAmount.toLocaleString()})`,
+    description: `${orderItems.length}개 품목 등록 (합계 ₩${totalAmount.toLocaleString()})`
+      + (customer.is_prepaid ? ' — 예치금 차감' : ''),
     changed_by: user.id,
     changed_by_name: profile?.name || null,
-    changed_by_role: 'admin',
+    changed_by_role: role,
   });
 
   return NextResponse.json({ success: true, order_number: orderNumber, order_id: order.id });

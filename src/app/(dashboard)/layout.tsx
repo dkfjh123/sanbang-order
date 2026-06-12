@@ -40,6 +40,7 @@ export default function DashboardLayout({
           name: user.email || '사용자',
           role: 'admin',
           store_id: null,
+          b2b_customer_id: null,
           created_at: '',
         });
         setLoading(false);
