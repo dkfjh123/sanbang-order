@@ -5,13 +5,13 @@ export const menuItems: MenuItem[] = [
   { label: '발주하기', href: '/orders/new', roles: ['admin', 'store'] },
   { label: '발주내역', href: '/orders', roles: ['admin', 'store', 'shinwa'] },
   { label: '상품관리', href: '/products', roles: ['admin', 'shinwa'] },
-  { label: '예치금관리', href: '/deposits', roles: ['admin', 'store'], storeReadOnly: true },
+  { label: '예치금관리', href: '/deposits', roles: ['admin', 'store', 'b2b'], storeReadOnly: true },
   { label: '재고관리', href: '/inventory', roles: ['admin', 'shinwa'] },
   { label: '가맹점관리', href: '/stores', roles: ['admin', 'shinwa'] },
   { label: '출고내역', href: '/shipments', roles: ['admin'] },
   { label: '정산관리', href: '/settlement', roles: ['admin'] },
   { label: '공지사항', href: '/notices', roles: ['admin', 'store', 'shinwa'] },
-  { label: 'B2B 발주', href: '/b2b', roles: ['admin', 'shinwa'] },
+  { label: 'B2B 발주', href: '/b2b', roles: ['admin', 'shinwa', 'b2b'] },
 ];
 
 export function getMenuForRole(role: UserRole): MenuItem[] {

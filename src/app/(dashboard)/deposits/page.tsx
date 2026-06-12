@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import type { Store, Profile, DepositRequest } from '@/types';
+import type { Store, Profile, DepositRequest, B2bCustomer, B2bDepositRequest, B2bDepositTransaction } from '@/types';
 
 interface DepositTransaction {
   id: string;
@@ -31,6 +31,15 @@ export default function DepositsPage() {
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [myRequests, setMyRequests] = useState<DepositRequest[]>([]);
+  // B2B 거래처 (선입금) — admin 의 B2B 모드 + b2b 역할 본인 화면
+  const [mode, setMode] = useState<'store' | 'b2b'>('store');
+  const [b2bCustomers, setB2bCustomers] = useState<B2bCustomer[]>([]);
+  const [selectedB2bId, setSelectedB2bId] = useState('');
+  const [b2bTransactions, setB2bTransactions] = useState<B2bDepositTransaction[]>([]);
+  const [b2bRequests, setB2bRequests] = useState<B2bDepositRequest[]>([]);
+  const [showB2bAdjustModal, setShowB2bAdjustModal] = useState(false);
+  const [showB2bRequestModal, setShowB2bRequestModal] = useState(false);
+  const [processingRequestId, setProcessingRequestId] = useState<string | null>(null);
   const supabase = createClient();
 
   useEffect(() => {
@@ -43,8 +52,19 @@ export default function DepositsPage() {
       setProfile(prof as Profile);
 
       if (prof.role === 'admin') {
-        const { data: storeList } = await supabase.from('stores').select('*').eq('is_direct', false).order('created_at');
+        const [{ data: storeList }, { data: b2bList }] = await Promise.all([
+          supabase.from('stores').select('*').eq('is_direct', false).order('created_at'),
+          supabase.from('b2b_customers').select('*').eq('is_prepaid', true).eq('is_active', true).order('name'),
+        ]);
         setStores((storeList as Store[]) || []);
+        setB2bCustomers((b2bList as B2bCustomer[]) || []);
+      } else if (prof.role === 'b2b') {
+        // RLS 가 자기 거래처 행만 반환
+        const { data: b2bList } = await supabase.from('b2b_customers').select('*');
+        const mine = (b2bList as B2bCustomer[]) || [];
+        setB2bCustomers(mine);
+        if (mine[0]) setSelectedB2bId(mine[0].id);
+        setMode('b2b');
       } else if (prof.store_id) {
         const { data: s } = await supabase.from('stores').select('*').eq('id', prof.store_id).single();
         if (s) {
@@ -53,9 +73,12 @@ export default function DepositsPage() {
         }
       }
 
-      // 가맹점: 내 입금 요청 내역
+      // 가맹점/B2B: 내 입금 요청 내역
       if (prof.role === 'store') {
         loadMyRequests();
+      }
+      if (prof.role === 'b2b' || prof.role === 'admin') {
+        loadB2bRequests();
       }
 
       setLoading(false);
@@ -71,9 +94,21 @@ export default function DepositsPage() {
     }
   }
 
+  async function loadB2bRequests() {
+    const res = await fetch('/api/b2b/deposit-requests');
+    if (res.ok) {
+      const data = await res.json();
+      setB2bRequests(data);
+    }
+  }
+
   useEffect(() => {
     if (selectedStoreId) loadTransactions();
   }, [selectedStoreId]);
+
+  useEffect(() => {
+    if (selectedB2bId) loadB2bTransactions();
+  }, [selectedB2bId]);
 
   async function loadTransactions() {
     const { data } = await supabase
@@ -85,7 +120,44 @@ export default function DepositsPage() {
     setTransactions((data as DepositTransaction[]) || []);
   }
 
+  async function loadB2bTransactions() {
+    const { data } = await supabase
+      .from('b2b_deposit_transactions')
+      .select('*')
+      .eq('b2b_customer_id', selectedB2bId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    setB2bTransactions((data as B2bDepositTransaction[]) || []);
+  }
+
+  async function refreshB2bBalance() {
+    const { data } = await supabase.from('b2b_customers').select('id, deposit_balance').eq('id', selectedB2bId).single();
+    if (data) {
+      setB2bCustomers((prev) =>
+        prev.map((c) => c.id === selectedB2bId ? { ...c, deposit_balance: (data as { deposit_balance: number }).deposit_balance } : c)
+      );
+    }
+  }
+
+  async function handleB2bRequestAction(id: string, action: 'approve' | 'reject') {
+    if (!confirm(action === 'approve' ? '입금을 확인했고 충전을 승인할까요?' : '이 요청을 반려할까요?')) return;
+    setProcessingRequestId(id);
+    const res = await fetch('/api/b2b/deposit-requests', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, action }),
+    });
+    setProcessingRequestId(null);
+    if (!res.ok) {
+      const data = await res.json();
+      alert(data.error || '처리에 실패했습니다.');
+      return;
+    }
+    await Promise.all([loadB2bRequests(), loadB2bTransactions(), refreshB2bBalance()]);
+  }
+
   const selectedStore = stores.find((s) => s.id === selectedStoreId);
+  const selectedB2b = b2bCustomers.find((c) => c.id === selectedB2bId);
 
   if (loading) {
     return (
@@ -100,7 +172,7 @@ export default function DepositsPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800">예치금 관리</h2>
         <div className="flex gap-2">
-          {profile?.role === 'admin' && selectedStore && (
+          {profile?.role === 'admin' && mode === 'store' && selectedStore && (
             <button
               onClick={() => setShowAdjustModal(true)}
               className="px-4 py-2 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition"
@@ -108,8 +180,70 @@ export default function DepositsPage() {
               예치금 조정
             </button>
           )}
+          {profile?.role === 'admin' && mode === 'b2b' && selectedB2b && (
+            <button
+              onClick={() => setShowB2bAdjustModal(true)}
+              className="px-4 py-2 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition"
+            >
+              예치금 조정
+            </button>
+          )}
         </div>
       </div>
+
+      {/* 관리자: 가맹점 / B2B 거래처 모드 전환 */}
+      {profile?.role === 'admin' && (
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+          {([['store', '가맹점'], ['b2b', 'B2B 거래처']] as const).map(([m, label]) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
+                mode === m ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* B2B 거래처: 예치금 충전 안내 플로우 */}
+      {profile?.role === 'b2b' && (
+        <div className="bg-gradient-to-br from-green-50 to-emerald-50 border border-green-200 rounded-xl p-5">
+          <p className="text-sm font-bold text-green-800 mb-4">예치금 충전 방법</p>
+          <div className="flex items-start gap-0">
+            <div className="flex-1 text-center">
+              <div className="w-10 h-10 rounded-full bg-[#1B4332] text-white flex items-center justify-center mx-auto text-lg font-bold">1</div>
+              <p className="text-xs font-semibold text-gray-700 mt-2">계좌로 입금</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 leading-tight">아래 계좌로<br />금액 이체</p>
+            </div>
+            <div className="pt-5 text-gray-300 text-lg">&#10132;</div>
+            <div className="flex-1 text-center">
+              <div className="w-10 h-10 rounded-full bg-[#1B4332] text-white flex items-center justify-center mx-auto text-lg font-bold">2</div>
+              <p className="text-xs font-semibold text-gray-700 mt-2">입금 확인 요청</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 leading-tight">아래 버튼으로<br />금액 알림</p>
+            </div>
+            <div className="pt-5 text-gray-300 text-lg">&#10132;</div>
+            <div className="flex-1 text-center">
+              <div className="w-10 h-10 rounded-full bg-[#1B4332] text-white flex items-center justify-center mx-auto text-lg font-bold">3</div>
+              <p className="text-xs font-semibold text-gray-700 mt-2">본사 승인</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 leading-tight">확인 후<br />예치금 반영</p>
+            </div>
+          </div>
+          <div className="mt-4 bg-white/70 rounded-lg p-3 border border-green-100">
+            <p className="text-xs text-gray-500 font-medium mb-1">입금 계좌</p>
+            <p className="text-base font-bold text-gray-800">하나은행 776-910015-28704</p>
+            <p className="text-xs text-gray-500">예금주: 산방에프앤비 주식회사</p>
+          </div>
+          <button
+            onClick={() => setShowB2bRequestModal(true)}
+            className="w-full mt-4 py-3 bg-[#1B4332] text-white rounded-lg font-semibold text-sm hover:bg-[#2D6A4F] transition flex items-center justify-center gap-2"
+          >
+            <span className="text-base">&#9989;</span> 입금했어요 — 확인 요청하기
+          </button>
+        </div>
+      )}
 
       {/* 가맹점: 예치금 충전 안내 플로우 */}
       {profile?.role === 'store' && (
@@ -161,7 +295,7 @@ export default function DepositsPage() {
       )}
 
       {/* 가맹점 선택 (관리자만) */}
-      {profile?.role === 'admin' && (
+      {profile?.role === 'admin' && mode === 'store' && (
         <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
           <label className="block text-sm font-medium text-gray-700 mb-2">가맹점 선택</label>
           <select
@@ -177,16 +311,164 @@ export default function DepositsPage() {
         </div>
       )}
 
-      {/* 잔액 표시 */}
-      {selectedStore && (
+      {/* B2B 거래처 선택 (관리자, B2B 모드) */}
+      {profile?.role === 'admin' && mode === 'b2b' && (
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+          <label className="block text-sm font-medium text-gray-700 mb-2">B2B 거래처 선택 (선입금)</label>
+          {b2bCustomers.length === 0 ? (
+            <p className="text-sm text-gray-400">선입금 방식 B2B 거래처가 없습니다.</p>
+          ) : (
+            <select
+              value={selectedB2bId}
+              onChange={(e) => setSelectedB2bId(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+            >
+              <option value="">선택하세요</option>
+              {b2bCustomers.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      {/* 잔액 표시 (가맹점) */}
+      {mode === 'store' && selectedStore && (
         <div className="bg-gradient-to-r from-[#1B4332] to-[#2D6A4F] rounded-xl p-6 text-white shadow-sm">
           <p className="text-sm opacity-80">{selectedStore.short_name || selectedStore.name} 예치금 잔액</p>
           <p className="text-3xl font-bold mt-1">₩{selectedStore.deposit_balance.toLocaleString()}</p>
         </div>
       )}
 
+      {/* 잔액 표시 (B2B) */}
+      {mode === 'b2b' && selectedB2b && (
+        <div className="bg-gradient-to-r from-[#1B4332] to-[#2D6A4F] rounded-xl p-6 text-white shadow-sm">
+          <p className="text-sm opacity-80">{selectedB2b.name} 예치금 잔액</p>
+          <p className="text-3xl font-bold mt-1">₩{selectedB2b.deposit_balance.toLocaleString()}</p>
+          {selectedB2b.min_order_amount > 0 && (
+            <p className="text-xs opacity-70 mt-1">최소 발주금액 ₩{selectedB2b.min_order_amount.toLocaleString()}</p>
+          )}
+        </div>
+      )}
+
+      {/* B2B 충전요청 처리 (관리자, B2B 모드) */}
+      {profile?.role === 'admin' && mode === 'b2b' && b2bRequests.filter((r) => r.status === 'pending').length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-700 text-sm">입금 확인 요청 (대기중)</h3>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {b2bRequests.filter((r) => r.status === 'pending').map((req) => (
+              <div key={req.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-semibold text-gray-800">{req.b2b_customers?.name}</span>
+                    <span className="text-sm font-bold text-gray-800">₩{req.amount.toLocaleString()}</span>
+                    <span className="text-xs text-gray-400">{new Date(req.created_at).toLocaleString('ko-KR')}</span>
+                  </div>
+                  {req.description && <p className="text-xs text-gray-500 mt-0.5">{req.description}</p>}
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button
+                    onClick={() => handleB2bRequestAction(req.id, 'approve')}
+                    disabled={processingRequestId === req.id}
+                    className="px-3 py-1.5 bg-[#1B4332] text-white rounded-lg text-xs font-medium hover:bg-[#2D6A4F] transition disabled:opacity-50"
+                  >
+                    승인
+                  </button>
+                  <button
+                    onClick={() => handleB2bRequestAction(req.id, 'reject')}
+                    disabled={processingRequestId === req.id}
+                    className="px-3 py-1.5 border border-red-300 text-red-600 rounded-lg text-xs font-medium hover:bg-red-50 transition disabled:opacity-50"
+                  >
+                    반려
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* B2B 거래 내역 */}
+      {mode === 'b2b' && selectedB2bId && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-700 text-sm">거래 내역</h3>
+          </div>
+          {b2bTransactions.length === 0 ? (
+            <div className="p-8 text-center text-gray-400 text-sm">거래 내역이 없습니다.</div>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {b2bTransactions.map((tx) => {
+                const tl = typeLabel[tx.type] || { text: tx.type, color: 'text-gray-600' };
+                return (
+                  <div key={tx.id} className="px-4 py-3 flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-sm font-medium ${tl.color}`}>{tl.text}</span>
+                        <span className="text-xs text-gray-400">
+                          {new Date(tx.created_at).toLocaleString('ko-KR')}
+                        </span>
+                      </div>
+                      {tx.description && (
+                        <p className="text-xs text-gray-500 mt-0.5">{tx.description}</p>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      <p className={`font-semibold ${tx.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {tx.amount >= 0 ? '+' : ''}₩{tx.amount.toLocaleString()}
+                      </p>
+                      <p className="text-xs text-gray-400">잔액 ₩{tx.balance_after.toLocaleString()}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* B2B 거래처: 내 입금 요청 내역 */}
+      {profile?.role === 'b2b' && b2bRequests.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-700 text-sm">입금 확인 요청 내역</h3>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {b2bRequests.map((req) => {
+              const statusStyle = {
+                pending: { text: '대기중', color: 'text-yellow-700 bg-yellow-50' },
+                approved: { text: '승인', color: 'text-green-700 bg-green-50' },
+                rejected: { text: '반려', color: 'text-red-700 bg-red-50' },
+              }[req.status];
+              return (
+                <div key={req.id} className="px-4 py-3 flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${statusStyle.color}`}>
+                        {statusStyle.text}
+                      </span>
+                      <span className="text-sm font-semibold text-gray-800">
+                        ₩{req.amount.toLocaleString()}
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        {new Date(req.created_at).toLocaleString('ko-KR')}
+                      </span>
+                    </div>
+                    {req.description && (
+                      <p className="text-xs text-gray-500 mt-0.5">{req.description}</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* 거래 내역 */}
-      {selectedStoreId && (
+      {mode === 'store' && selectedStoreId && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-200">
             <h3 className="font-semibold text-gray-700 text-sm">거래 내역</h3>
@@ -293,6 +575,301 @@ export default function DepositsPage() {
           }}
         />
       )}
+
+      {/* B2B 입금 요청 모달 (거래처) */}
+      {showB2bRequestModal && profile?.role === 'b2b' && (
+        <B2bDepositRequestModal
+          onClose={() => setShowB2bRequestModal(false)}
+          onSaved={() => {
+            setShowB2bRequestModal(false);
+            loadB2bRequests();
+          }}
+        />
+      )}
+
+      {/* B2B 예치금 조정 모달 (관리자) */}
+      {showB2bAdjustModal && selectedB2b && (
+        <B2bAdjustModal
+          customer={selectedB2b}
+          onClose={() => setShowB2bAdjustModal(false)}
+          onSaved={() => {
+            setShowB2bAdjustModal(false);
+            loadB2bTransactions();
+            refreshB2bBalance();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function B2bAdjustModal({
+  customer,
+  onClose,
+  onSaved,
+}: {
+  customer: B2bCustomer;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [type, setType] = useState<'deposit' | 'withdrawal' | 'adjust_add' | 'adjust_subtract'>('deposit');
+  const [amount, setAmount] = useState('');
+  const [displayAmount, setDisplayAmount] = useState('');
+  const [description, setDescription] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const formatNumber = (val: string) => {
+    const num = val.replace(/[^0-9]/g, '');
+    return num ? Number(num).toLocaleString() : '';
+  };
+
+  const handleAmountChange = (val: string) => {
+    const raw = val.replace(/[^0-9]/g, '');
+    setAmount(raw);
+    setDisplayAmount(formatNumber(raw));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    const numAmount = Number(amount);
+    if (numAmount <= 0) {
+      setError('금액을 입력해주세요.');
+      setLoading(false);
+      return;
+    }
+
+    const apiType = type === 'deposit' ? 'deposit' : type === 'withdrawal' ? 'withdrawal' : 'adjustment';
+    const res = await fetch('/api/b2b/deposits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        b2b_customer_id: customer.id,
+        type: apiType,
+        amount: numAmount,
+        direction: type === 'adjust_subtract' ? 'subtract' : 'add',
+        description: description || undefined,
+      }),
+    });
+
+    const data = await res.json();
+    setLoading(false);
+
+    if (!res.ok) {
+      setError(data.error || '처리에 실패했습니다.');
+      return;
+    }
+
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-gray-800">B2B 예치금 조정</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
+
+        <p className="text-sm text-gray-500 mb-4">
+          {customer.name} — 현재 잔액: ₩{customer.deposit_balance.toLocaleString()}
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">구분</label>
+            <select
+              value={type}
+              onChange={(e) => setType(e.target.value as typeof type)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+            >
+              <option value="deposit">입금 (충전)</option>
+              <option value="withdrawal">출금</option>
+              <option value="adjust_add">조정 (+)</option>
+              <option value="adjust_subtract">조정 (−)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">금액 (원)</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={displayAmount}
+              onChange={(e) => handleAmountChange(e.target.value)}
+              required
+              placeholder="0"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 text-lg font-semibold"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">설명</label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="예: 6/15 입금 확인"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+            />
+          </div>
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">{error}</div>
+          )}
+
+          <div className="flex gap-3">
+            <button type="button" onClick={onClose}
+              className="flex-1 py-2 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition">
+              취소
+            </button>
+            <button type="submit" disabled={loading}
+              className="flex-1 py-2 bg-[#1B4332] text-white rounded-lg font-medium hover:bg-[#2D6A4F] transition disabled:opacity-50">
+              {loading ? '처리 중...' : '확인'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function B2bDepositRequestModal({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [displayAmount, setDisplayAmount] = useState('');
+  const [description, setDescription] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
+
+  const formatNumber = (val: string) => {
+    const num = val.replace(/[^0-9]/g, '');
+    return num ? Number(num).toLocaleString() : '';
+  };
+
+  const handleAmountChange = (val: string) => {
+    const raw = val.replace(/[^0-9]/g, '');
+    setAmount(raw);
+    setDisplayAmount(formatNumber(raw));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    const numAmount = Number(amount);
+    if (numAmount <= 0) {
+      setError('금액을 입력해주세요.');
+      setLoading(false);
+      return;
+    }
+
+    const res = await fetch('/api/b2b/deposit-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: numAmount,
+        description: description || '예치금 입금',
+      }),
+    });
+
+    const data = await res.json();
+    setLoading(false);
+
+    if (!res.ok) {
+      setError(data.error);
+      return;
+    }
+
+    setSuccess(true);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+        {success ? (
+          <div className="text-center py-6">
+            <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">
+              <span className="text-3xl">&#9989;</span>
+            </div>
+            <h3 className="text-xl font-bold text-gray-800 mb-2">요청되었습니다!</h3>
+            <p className="text-sm text-gray-500 mb-1">입금 확인 후 본사가 승인하면</p>
+            <p className="text-sm text-gray-500 mb-6">예치금에 자동으로 반영됩니다.</p>
+            <button
+              onClick={() => { onSaved(); }}
+              className="w-full py-3 bg-[#1B4332] text-white rounded-lg font-semibold hover:bg-[#2D6A4F] transition"
+            >
+              확인
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-800">입금 확인 요청</h3>
+              <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
+              <p className="text-xs text-yellow-800 font-medium">아래 계좌로 입금 후 요청해주세요</p>
+              <p className="text-sm font-bold text-gray-800 mt-1">하나은행 776-910015-28704</p>
+              <p className="text-xs text-gray-600">예금주: 산방에프앤비 주식회사</p>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">입금 금액 (원)</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={displayAmount}
+                  onChange={(e) => handleAmountChange(e.target.value)}
+                  required
+                  placeholder="0"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 text-lg font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">입금일자 메모 <span className="text-red-500">*</span></label>
+                <input
+                  type="text"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  required
+                  placeholder="예: 6/15 입금"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900"
+                />
+                <p className="text-xs text-gray-400 mt-1">입금한 날짜를 적어주세요. 본사가 계좌 확인 시 참고합니다.</p>
+              </div>
+
+              {error && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">{error}</div>
+              )}
+
+              <div className="flex gap-3">
+                <button type="button" onClick={onClose}
+                  className="flex-1 py-2 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition">
+                  취소
+                </button>
+                <button type="submit" disabled={loading}
+                  className="flex-1 py-2 bg-[#1B4332] text-white rounded-lg font-medium hover:bg-[#2D6A4F] transition disabled:opacity-50">
+                  {loading ? '요청 중...' : '확인 요청하기'}
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+      </div>
     </div>
   );
 }

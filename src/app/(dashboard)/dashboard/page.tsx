@@ -124,6 +124,13 @@ export default function DashboardPage() {
         .single();
 
       if (!prof) return;
+
+      // B2B 거래처 계정은 전용 화면(B2B 발주)으로 이동
+      if (prof.role === 'b2b') {
+        window.location.replace('/b2b');
+        return;
+      }
+
       setProfile(prof as Profile);
 
       if (prof.store_id) {

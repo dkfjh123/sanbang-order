@@ -8,21 +8,6 @@ import type { B2bCustomer, B2bProduct, B2bUnit } from '@/types';
 
 type InvRow = { product_id: string; quantity: number; loose_pack_qty: number };
 
-type PriceRow = {
-  product_id: string;
-  b2b_price: number;
-  b2b_price_with_tax: number;
-  available_units: B2bUnit[];
-};
-
-type ProductRow = {
-  id: string;
-  name: string;
-  product_type: 'exclusive' | 'general';
-  pack_per_box: number;
-  is_tax_free: boolean;
-};
-
 type CartItem = {
   product_id: string;
   product_name: string;
@@ -45,6 +30,7 @@ export default function B2bNewOrderPage() {
   const [customers, setCustomers] = useState<B2bCustomer[]>([]);
   const [products, setProducts] = useState<B2bProduct[]>([]);
   const [inventory, setInventory] = useState<Record<string, InvRow>>({});
+  const [role, setRole] = useState<'admin' | 'b2b' | null>(null);
   const [loading, setLoading] = useState(true);
   const [productsLoading, setProductsLoading] = useState(false);
 
@@ -59,9 +45,20 @@ export default function B2bNewOrderPage() {
 
   useEffect(() => {
     (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      let nextRole: 'admin' | 'b2b' | null = null;
+      if (user) {
+        const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single();
+        nextRole = (prof?.role === 'admin' || prof?.role === 'b2b') ? prof.role : null;
+      }
+      setRole(nextRole);
+
+      // b2b 역할은 RLS 가 자기 거래처 행만 반환. inventory 는 admin 만 조회(거래처에 재고 비노출).
       const [customersRes, invRes] = await Promise.all([
         supabase.from('b2b_customers').select('*').eq('is_active', true).order('name'),
-        supabase.from('inventory').select('product_id, quantity, loose_pack_qty'),
+        nextRole === 'admin'
+          ? supabase.from('inventory').select('product_id, quantity, loose_pack_qty')
+          : Promise.resolve({ data: [] as InvRow[] }),
       ]);
 
       const nextCustomers = (customersRes.data as B2bCustomer[]) || [];
@@ -86,57 +83,21 @@ export default function B2bNewOrderPage() {
       setProductsLoading(true);
       setError('');
 
-      const { data: priceData, error: priceError } = await supabase
-        .from('b2b_customer_product_prices')
-        .select('product_id, b2b_price, b2b_price_with_tax, available_units')
-        .eq('customer_id', customerId)
-        .eq('is_active', true);
+      // 서버 API — 거래처 단가표 + 상품 안전 필드만 (원가 비노출, b2b/admin 공용)
+      const res = await fetch(`/api/b2b/products?customer_id=${customerId}`);
+      const data = await res.json();
 
-      if (priceError) {
+      if (!res.ok) {
         setProducts([]);
-        setError(`B2B 단가표를 불러오지 못했습니다: ${priceError.message}`);
+        setError(data.error || 'B2B 단가표를 불러오지 못했습니다.');
         setProductsLoading(false);
         return;
       }
 
-      const prices = (priceData as PriceRow[]) || [];
-      const productIds = prices.map((price) => price.product_id);
-      if (productIds.length === 0) {
-        setProducts([]);
-        setProductsLoading(false);
-        return;
-      }
-
-      const { data: productData, error: productError } = await supabase
-        .from('products')
-        .select('id, name, product_type, pack_per_box, is_tax_free')
-        .in('id', productIds)
-        .eq('product_type', 'exclusive')
-        .order('name');
-
-      if (productError) {
-        setProducts([]);
-        setError(`상품 정보를 불러오지 못했습니다: ${productError.message}`);
-        setProductsLoading(false);
-        return;
-      }
-
-      const priceByProduct = new Map(prices.map((price) => [price.product_id, price]));
-      const nextProducts = ((productData as ProductRow[]) || []).map((product) => {
-        const price = priceByProduct.get(product.id)!;
-        return {
-          ...product,
-          b2b_price: price.b2b_price,
-          b2b_price_with_tax: price.b2b_price_with_tax,
-          available_units: price.available_units || ['box'],
-          is_b2b_eligible: true,
-        };
-      });
-
-      setProducts(nextProducts);
+      setProducts((data as B2bProduct[]) || []);
       setProductsLoading(false);
     })();
-  }, [customerId, supabase]);
+  }, [customerId]);
 
   const selectedCustomer = customers.find((customer) => customer.id === customerId);
 
@@ -248,28 +209,51 @@ export default function B2bNewOrderPage() {
   return (
     <div className="space-y-6 pb-24">
       <div>
-        <Link href="/b2b" className="text-sm text-primary hover:underline">B2B 발주 목록으로</Link>
-        <h2 className="text-xl font-bold text-gray-800 mt-1">B2B 발주 등록</h2>
+        <Link href="/b2b" className="text-sm text-primary hover:underline">{role === 'b2b' ? '발주 내역으로' : 'B2B 발주 목록으로'}</Link>
+        <h2 className="text-xl font-bold text-gray-800 mt-1">{role === 'b2b' ? '발주 등록' : 'B2B 발주 등록'}</h2>
         <p className="text-sm text-gray-500 mt-1">
-          거래처별 B2B 단가표 기준으로 발주를 입력합니다. 등록 시점에는 재고가 차감되지 않으며,
-          상세에서 <b>출고 처리</b>를 눌러야 차감됩니다.
+          {role === 'b2b' ? (
+            <>등록과 동시에 예치금에서 차감됩니다. 출고 전(대기) 상태에서는 취소할 수 있고, 취소하면 자동 환불됩니다.</>
+          ) : (
+            <>거래처별 B2B 단가표 기준으로 발주를 입력합니다. 등록 시점에는 재고가 차감되지 않으며,
+            상세에서 <b>출고 처리</b>를 눌러야 차감됩니다.</>
+          )}
         </p>
       </div>
+
+      {/* 선입금 거래처: 잔액 · 최소주문 안내 */}
+      {selectedCustomer?.is_prepaid && (
+        <div className="bg-gradient-to-r from-[#1B4332] to-[#2D6A4F] rounded-xl p-4 text-white shadow-sm flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <p className="text-xs opacity-80">{selectedCustomer.name} 예치금 잔액</p>
+            <p className="text-xl font-bold">₩{selectedCustomer.deposit_balance.toLocaleString()}</p>
+          </div>
+          {selectedCustomer.min_order_amount > 0 && (
+            <p className="text-xs opacity-80">최소 발주금액 ₩{selectedCustomer.min_order_amount.toLocaleString()}</p>
+          )}
+        </div>
+      )}
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 space-y-3">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">거래처 *</label>
-            <select
-              value={customerId}
-              onChange={(e) => handleCustomerChange(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 text-sm"
-            >
-              <option value="">선택하세요</option>
-              {customers.map((customer) => (
-                <option key={customer.id} value={customer.id}>{customer.name}</option>
-              ))}
-            </select>
+            {role === 'b2b' ? (
+              <div className="w-full px-3 py-2 border border-gray-200 bg-gray-50 rounded-lg text-gray-800 text-sm font-medium">
+                {selectedCustomer?.name || '거래처 정보를 불러오는 중'}
+              </div>
+            ) : (
+              <select
+                value={customerId}
+                onChange={(e) => handleCustomerChange(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 text-sm"
+              >
+                <option value="">선택하세요</option>
+                {customers.map((customer) => (
+                  <option key={customer.id} value={customer.id}>{customer.name}</option>
+                ))}
+              </select>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">주문일 *</label>
@@ -322,6 +306,7 @@ export default function B2bNewOrderPage() {
                 key={product.id}
                 product={product}
                 inv={inventory[product.id]}
+                showStock={role === 'admin'}
                 onAdd={(unit, qty) => addOrUpdate(product, unit, qty)}
               />
             ))}
@@ -374,6 +359,21 @@ export default function B2bNewOrderPage() {
         )}
       </div>
 
+      {/* 선입금 가드 안내 (서버에서도 동일 검증) */}
+      {cart.length > 0 && selectedCustomer && selectedCustomer.min_order_amount > 0
+        && totals.withTax < selectedCustomer.min_order_amount && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-3 py-2 rounded-lg text-sm">
+          최소 발주금액은 ₩{selectedCustomer.min_order_amount.toLocaleString()}입니다.
+          (현재 ₩{totals.withTax.toLocaleString()} — ₩{(selectedCustomer.min_order_amount - totals.withTax).toLocaleString()} 부족)
+        </div>
+      )}
+      {cart.length > 0 && selectedCustomer?.is_prepaid && totals.withTax > selectedCustomer.deposit_balance && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">
+          예치금이 부족합니다. 잔액 ₩{selectedCustomer.deposit_balance.toLocaleString()} / 필요 ₩{totals.withTax.toLocaleString()}
+          {role === 'b2b' && <> — <Link href="/deposits" className="underline font-medium">충전하러 가기</Link></>}
+        </div>
+      )}
+
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">{error}</div>
       )}
@@ -385,7 +385,12 @@ export default function B2bNewOrderPage() {
         </div>
         <button
           onClick={submit}
-          disabled={submitting || cart.length === 0}
+          disabled={
+            submitting
+            || cart.length === 0
+            || (!!selectedCustomer && selectedCustomer.min_order_amount > 0 && totals.withTax < selectedCustomer.min_order_amount)
+            || (!!selectedCustomer?.is_prepaid && totals.withTax > selectedCustomer.deposit_balance)
+          }
           className="px-6 py-2 bg-primary text-white rounded-lg font-medium hover:bg-primary-light transition disabled:opacity-50"
         >
           {submitting ? '등록 중...' : '발주 등록'}
@@ -398,10 +403,12 @@ export default function B2bNewOrderPage() {
 function ProductRow({
   product,
   inv,
+  showStock,
   onAdd,
 }: {
   product: B2bProduct;
   inv: InvRow | undefined;
+  showStock: boolean;
   onAdd: (unit: B2bUnit, qty: number) => void;
 }) {
   const [selectedUnit, setSelectedUnit] = useState<B2bUnit>(product.available_units[0] || 'box');
@@ -431,9 +438,11 @@ function ProductRow({
         ) : (
           <p className="text-xs text-amber-600">B2B 단가 미설정</p>
         )}
-        <p className="text-xs text-gray-400">
-          현재 재고: 박스 <b>{curBox}</b> · 낱팩 <b>{curLoose}</b> (총 {availablePacks}팩)
-        </p>
+        {showStock && (
+          <p className="text-xs text-gray-400">
+            현재 재고: 박스 <b>{curBox}</b> · 낱팩 <b>{curLoose}</b> (총 {availablePacks}팩)
+          </p>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <select

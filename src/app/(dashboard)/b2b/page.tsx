@@ -25,7 +25,7 @@ export default function B2bOrdersPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<B2bOrderStatus | 'all'>('all');
   const [customerFilter, setCustomerFilter] = useState<string>('all');
-  const [role, setRole] = useState<'admin' | 'shinwa' | null>(null);
+  const [role, setRole] = useState<'admin' | 'shinwa' | 'b2b' | null>(null);
   const supabase = createClient();
 
   useEffect(() => { load(); }, []);
@@ -34,9 +34,12 @@ export default function B2bOrdersPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
       const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single();
-      const r = (prof?.role === 'shinwa' || prof?.role === 'admin') ? prof.role as 'admin' | 'shinwa' : null;
+      const r = (prof?.role === 'shinwa' || prof?.role === 'admin' || prof?.role === 'b2b')
+        ? prof.role as 'admin' | 'shinwa' | 'b2b'
+        : null;
       setRole(r);
     }
+    // b2b 역할은 RLS 가 자기 거래처 주문/거래처 행만 돌려준다
     const [ordersRes, customersRes] = await Promise.all([
       supabase
         .from('b2b_orders')
@@ -71,29 +74,53 @@ export default function B2bOrdersPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-xl font-bold text-gray-800">
-            {role === 'shinwa' ? 'B2B 배송' : 'B2B 발주'}
+            {role === 'shinwa' ? 'B2B 배송' : role === 'b2b' ? '발주 내역' : 'B2B 발주'}
           </h2>
           {role === 'shinwa' && (
             <p className="text-xs text-gray-500 mt-1">대기 상태인 발주를 확인하고 출고 처리하세요.</p>
           )}
+          {role === 'b2b' && (
+            <p className="text-xs text-gray-500 mt-1">출고 전(대기) 주문은 상세에서 직접 취소할 수 있습니다.</p>
+          )}
         </div>
-        {role === 'admin' && (
-          <div className="flex gap-2">
+        <div className="flex gap-2">
+          {role === 'admin' && (
             <Link
               href="/b2b/customers"
               className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
             >
               거래처 관리
             </Link>
+          )}
+          {(role === 'admin' || role === 'b2b') && (
             <Link
               href="/b2b/new"
               className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition"
             >
               + 발주 등록
             </Link>
-          </div>
-        )}
+          )}
+        </div>
       </div>
+
+      {/* B2B 거래처: 예치금 잔액 배너 */}
+      {role === 'b2b' && customers[0] && customers[0].is_prepaid && (
+        <div className="bg-gradient-to-r from-[#1B4332] to-[#2D6A4F] rounded-xl p-5 text-white shadow-sm flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <p className="text-sm opacity-80">{customers[0].name} 예치금 잔액</p>
+            <p className="text-2xl font-bold mt-0.5">₩{customers[0].deposit_balance.toLocaleString()}</p>
+            {customers[0].min_order_amount > 0 && (
+              <p className="text-xs opacity-70 mt-1">최소 발주금액 ₩{customers[0].min_order_amount.toLocaleString()}</p>
+            )}
+          </div>
+          <Link
+            href="/deposits"
+            className="px-4 py-2 bg-white/15 hover:bg-white/25 rounded-lg text-sm font-medium transition"
+          >
+            충전하기
+          </Link>
+        </div>
+      )}
 
       {/* 필터 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 flex flex-wrap gap-3">
@@ -112,16 +139,18 @@ export default function B2bOrdersPage() {
             </button>
           ))}
         </div>
-        <select
-          value={customerFilter}
-          onChange={(e) => setCustomerFilter(e.target.value)}
-          className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700"
-        >
-          <option value="all">전체 거래처</option>
-          {customers.map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
+        {role !== 'b2b' && (
+          <select
+            value={customerFilter}
+            onChange={(e) => setCustomerFilter(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700"
+          >
+            <option value="all">전체 거래처</option>
+            {customers.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* 목록 */}

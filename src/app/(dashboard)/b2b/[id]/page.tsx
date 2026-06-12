@@ -37,7 +37,7 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
   const [order, setOrder] = useState<B2bOrder | null>(null);
   const [items, setItems] = useState<B2bOrderItem[]>([]);
   const [logs, setLogs] = useState<OrderLog[]>([]);
-  const [role, setRole] = useState<'admin' | 'shinwa' | null>(null);
+  const [role, setRole] = useState<'admin' | 'shinwa' | 'b2b' | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -62,7 +62,9 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
       if (user) {
         const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single();
         if (!cancelled) {
-          const r = (prof?.role === 'shinwa' || prof?.role === 'admin') ? prof.role as 'admin' | 'shinwa' : null;
+          const r = (prof?.role === 'shinwa' || prof?.role === 'admin' || prof?.role === 'b2b')
+            ? prof.role as 'admin' | 'shinwa' | 'b2b'
+            : null;
           setRole(r);
         }
       }
@@ -85,7 +87,9 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
   async function doAction(action: 'ship' | 'cancel') {
     const confirmMsg = action === 'ship'
       ? '출고 처리하시겠어요? 재고가 차감됩니다.'
-      : '이 발주를 취소하시겠어요?' + (order?.status === 'shipped' ? ' (재고 복구됨)' : '');
+      : '이 발주를 취소하시겠어요?'
+        + (order?.status === 'shipped' ? ' (재고 복구됨)' : '')
+        + ' 예치금으로 결제된 주문은 자동 환불됩니다.';
     if (!confirm(confirmMsg)) return;
 
     setBusy(true); setError('');
@@ -224,13 +228,24 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
         <div className="flex flex-wrap gap-2">
           {order.status === 'pending' && (
             <>
-              <button
-                onClick={() => doAction('ship')}
-                disabled={busy}
-                className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition disabled:opacity-50"
-              >
-                출고 처리 (재고 차감)
-              </button>
+              {(role === 'admin' || role === 'shinwa') && (
+                <button
+                  onClick={() => doAction('ship')}
+                  disabled={busy}
+                  className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary-light transition disabled:opacity-50"
+                >
+                  출고 처리 (재고 차감)
+                </button>
+              )}
+              {(role === 'admin' || role === 'b2b') && (
+                <button
+                  onClick={() => doAction('cancel')}
+                  disabled={busy}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition disabled:opacity-50"
+                >
+                  주문 취소
+                </button>
+              )}
               {role === 'admin' && (
                 <button
                   onClick={doDelete}
