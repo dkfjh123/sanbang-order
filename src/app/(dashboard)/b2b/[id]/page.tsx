@@ -140,12 +140,14 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
             {statusLabel[order.status]}
           </span>
         </div>
-        <button
-          onClick={() => window.open(`/b2b/statement/${order.id}`, '_blank')}
-          className="mt-3 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
-        >
-          거래명세서 출력
-        </button>
+        {role !== 'shinwa' && (
+          <button
+            onClick={() => window.open(`/b2b/statement/${order.id}`, '_blank')}
+            className="mt-3 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
+          >
+            거래명세서 출력
+          </button>
+        )}
       </div>
 
       {/* 주문 정보 */}
@@ -163,10 +165,12 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
             <p className="text-gray-500">출고일</p>
             <p className="font-medium text-gray-800">{order.ship_date || '-'}</p>
           </div>
-          <div>
-            <p className="text-gray-500">합계(세포함)</p>
-            <p className="font-semibold text-gray-800">₩{order.total_amount.toLocaleString()}</p>
-          </div>
+          {role !== 'shinwa' && (
+            <div>
+              <p className="text-gray-500">합계(세포함)</p>
+              <p className="font-semibold text-gray-800">₩{order.total_amount.toLocaleString()}</p>
+            </div>
+          )}
         </div>
         {order.memo && (
           <div className="mt-3 pt-3 border-t border-gray-100 text-sm">
@@ -188,8 +192,12 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
                 <th className="px-4 py-2 text-left font-medium text-gray-500">상품</th>
                 <th className="px-4 py-2 text-left font-medium text-gray-500">단위</th>
                 <th className="px-4 py-2 text-right font-medium text-gray-500">수량</th>
-                <th className="px-4 py-2 text-right font-medium text-gray-500">단가(세포함)</th>
-                <th className="px-4 py-2 text-right font-medium text-gray-500">합계(세포함)</th>
+                {role !== 'shinwa' && (
+                  <>
+                    <th className="px-4 py-2 text-right font-medium text-gray-500">단가(세포함)</th>
+                    <th className="px-4 py-2 text-right font-medium text-gray-500">합계(세포함)</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -200,25 +208,31 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
                     {it.unit === 'box' ? `박스 (${it.pack_per_box}팩)` : '팩'}
                   </td>
                   <td className="px-4 py-2 text-right text-gray-800">{it.quantity}</td>
-                  <td className="px-4 py-2 text-right text-gray-600">₩{it.unit_price_with_tax.toLocaleString()}</td>
-                  <td className="px-4 py-2 text-right font-semibold text-gray-800">₩{it.subtotal.toLocaleString()}</td>
+                  {role !== 'shinwa' && (
+                    <>
+                      <td className="px-4 py-2 text-right text-gray-600">₩{it.unit_price_with_tax.toLocaleString()}</td>
+                      <td className="px-4 py-2 text-right font-semibold text-gray-800">₩{it.subtotal.toLocaleString()}</td>
+                    </>
+                  )}
                 </tr>
               ))}
             </tbody>
-            <tfoot className="bg-gray-50 border-t border-gray-200">
-              <tr>
-                <td colSpan={4} className="px-4 py-2 text-right text-gray-500">세전 합계</td>
-                <td className="px-4 py-2 text-right text-gray-700">₩{order.total_amount_ex_tax.toLocaleString()}</td>
-              </tr>
-              <tr>
-                <td colSpan={4} className="px-4 py-2 text-right text-gray-500">부가세</td>
-                <td className="px-4 py-2 text-right text-gray-700">₩{(order.total_amount - order.total_amount_ex_tax).toLocaleString()}</td>
-              </tr>
-              <tr>
-                <td colSpan={4} className="px-4 py-2 text-right font-bold text-gray-800">세포함 합계</td>
-                <td className="px-4 py-2 text-right font-bold text-gray-800">₩{order.total_amount.toLocaleString()}</td>
-              </tr>
-            </tfoot>
+            {role !== 'shinwa' && (
+              <tfoot className="bg-gray-50 border-t border-gray-200">
+                <tr>
+                  <td colSpan={4} className="px-4 py-2 text-right text-gray-500">세전 합계</td>
+                  <td className="px-4 py-2 text-right text-gray-700">₩{order.total_amount_ex_tax.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td colSpan={4} className="px-4 py-2 text-right text-gray-500">부가세</td>
+                  <td className="px-4 py-2 text-right text-gray-700">₩{(order.total_amount - order.total_amount_ex_tax).toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td colSpan={4} className="px-4 py-2 text-right font-bold text-gray-800">세포함 합계</td>
+                  <td className="px-4 py-2 text-right font-bold text-gray-800">₩{order.total_amount.toLocaleString()}</td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       </div>
@@ -273,7 +287,8 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
         <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">{error}</div>
       )}
 
-      {/* 변경 이력 */}
+      {/* 변경 이력 — admin 전용 (금액·예치금 정보 포함) */}
+      {role === 'admin' && (
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-100">
           <h3 className="font-semibold text-gray-800">변경 이력</h3>
@@ -297,6 +312,7 @@ export default function B2bOrderDetailPage({ params }: { params: Promise<{ id: s
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

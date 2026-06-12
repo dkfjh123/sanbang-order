@@ -173,9 +173,11 @@ export default function B2bOrdersPage() {
                     {o.b2b_customers?.name} · {o.order_date}
                     {o.ship_date ? ` → 출고 ${o.ship_date}` : ''}
                   </p>
-                  <p className="text-sm font-semibold text-gray-800 mt-1">
-                    ₩{o.total_amount.toLocaleString()}
-                  </p>
+                  {role !== 'shinwa' && (
+                    <p className="text-sm font-semibold text-gray-800 mt-1">
+                      ₩{o.total_amount.toLocaleString()}
+                    </p>
+                  )}
                 </Link>
               ))}
             </div>
@@ -190,7 +192,9 @@ export default function B2bOrdersPage() {
                     <th className="px-4 py-3 text-left font-medium text-gray-500">주문일</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-500">출고일</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-500">상태</th>
-                    <th className="px-4 py-3 text-right font-medium text-gray-500">합계(세포함)</th>
+                    {role !== 'shinwa' && (
+                      <th className="px-4 py-3 text-right font-medium text-gray-500">합계(세포함)</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -205,9 +209,11 @@ export default function B2bOrdersPage() {
                           {statusLabel[o.status]}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-right font-semibold text-gray-800">
-                        ₩{o.total_amount.toLocaleString()}
-                      </td>
+                      {role !== 'shinwa' && (
+                        <td className="px-4 py-3 text-right font-semibold text-gray-800">
+                          ₩{o.total_amount.toLocaleString()}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
