@@ -25,6 +25,17 @@ interface OrderSummary {
   stores: { short_name: string | null; name: string };
 }
 
+interface B2bOrderSummary {
+  id: string;
+  order_number: string;
+  total_amount?: number; // 신화 계정은 조회하지 않음 (B2B 금액 숨김 원칙)
+  status: string;
+  order_date: string;
+  ship_date: string | null;
+  created_at: string;
+  b2b_customers: { name: string } | null;
+}
+
 interface StoreSummary {
   id: string;
   name: string;
@@ -86,6 +97,8 @@ export default function DashboardPage() {
   const [todayOrderList, setTodayOrderList] = useState<OrderSummary[]>([]);
   const [pendingOrderList, setPendingOrderList] = useState<OrderSummary[]>([]);
   const [monthlyOrderList, setMonthlyOrderList] = useState<OrderSummary[]>([]);
+  const [b2bPendingCount, setB2bPendingCount] = useState(0);
+  const [b2bPendingList, setB2bPendingList] = useState<B2bOrderSummary[]>([]);
 
   const JEJU_PALLET_MIN = 55;
   const supabase = createClient();
@@ -275,6 +288,25 @@ export default function DashboardPage() {
         setPendingDelivery(cCount || 0);
       }
 
+      // B2B 미출고 발주 (관리자/신화 공통) — 가맹점 orders 와 별도 테이블이라 따로 집계
+      if (prof.role === 'admin' || prof.role === 'shinwa') {
+        const b2bCols = 'id, order_number, status, order_date, ship_date, created_at, b2b_customers(name)';
+        const { data: b2bData } = await supabase
+          .from('b2b_orders')
+          .select(prof.role === 'admin' ? `total_amount, ${b2bCols}` : b2bCols)
+          .in('status', ['pending', 'confirmed'])
+          .order('ship_date', { ascending: true, nullsFirst: false })
+          .order('created_at', { ascending: false })
+          .limit(5);
+        setB2bPendingList((b2bData as unknown as B2bOrderSummary[]) || []);
+
+        const { count: b2bCount } = await supabase
+          .from('b2b_orders')
+          .select('*', { count: 'exact', head: true })
+          .in('status', ['pending', 'confirmed']);
+        setB2bPendingCount(b2bCount || 0);
+      }
+
       // 제주 파레트 현황 (관리자/신화만)
       if (prof.role === 'admin' || prof.role === 'shinwa') {
         const now = new Date();
@@ -419,7 +451,7 @@ export default function DashboardPage() {
       {/* ========== 관리자 대시보드 ========== */}
       {profile.role === 'admin' && (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
             <StatCard
               title="등록 가맹점"
               value={`${storeCount}곳`}
@@ -439,6 +471,13 @@ export default function DashboardPage() {
               color="yellow"
               isExpanded={expandedCard === 'pendingDelivery'}
               onToggle={() => toggleCard('pendingDelivery')}
+            />
+            <StatCard
+              title="B2B 출고 대기"
+              value={`${b2bPendingCount}건`}
+              color={b2bPendingCount > 0 ? 'red' : 'yellow'}
+              isExpanded={expandedCard === 'b2bPending'}
+              onToggle={() => toggleCard('b2bPending')}
             />
             <StatCard
               title="입금 확인 대기"
@@ -507,6 +546,20 @@ export default function DashboardPage() {
                 <>
                   <OrderList orders={pendingOrderList} />
                   <ExpandedFooter href="/orders" />
+                </>
+              )}
+            </ExpandedPanel>
+          )}
+
+          {/* B2B 출고 대기 펼침 */}
+          {expandedCard === 'b2bPending' && (
+            <ExpandedPanel>
+              {b2bPendingList.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-4">B2B 출고 대기 건이 없습니다.</p>
+              ) : (
+                <>
+                  <B2bOrderList orders={b2bPendingList} showAmount />
+                  <ExpandedFooter href="/b2b" />
                 </>
               )}
             </ExpandedPanel>
@@ -852,7 +905,7 @@ export default function DashboardPage() {
       {/* ========== 신화푸드 대시보드 ========== */}
       {profile.role === 'shinwa' && (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <StatCard
               title="처리 대기 발주"
               value={`${todayOrders}건`}
@@ -866,6 +919,13 @@ export default function DashboardPage() {
               color="yellow"
               isExpanded={expandedCard === 'shinwaDelivery'}
               onToggle={() => toggleCard('shinwaDelivery')}
+            />
+            <StatCard
+              title="B2B 출고 대기"
+              value={`${b2bPendingCount}건`}
+              color={b2bPendingCount > 0 ? 'red' : 'yellow'}
+              isExpanded={expandedCard === 'shinwaB2b'}
+              onToggle={() => toggleCard('shinwaB2b')}
             />
           </div>
 
@@ -890,6 +950,19 @@ export default function DashboardPage() {
                 <>
                   <OrderList orders={pendingOrderList} />
                   <ExpandedFooter href="/orders" />
+                </>
+              )}
+            </ExpandedPanel>
+          )}
+
+          {expandedCard === 'shinwaB2b' && (
+            <ExpandedPanel>
+              {b2bPendingList.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-4">B2B 출고 대기 건이 없습니다.</p>
+              ) : (
+                <>
+                  <B2bOrderList orders={b2bPendingList} showAmount={false} />
+                  <ExpandedFooter href="/b2b" />
                 </>
               )}
             </ExpandedPanel>
@@ -1177,6 +1250,41 @@ function ExpandedFooter({ href }: { href: string }) {
       <a href={href} className="text-sm text-[#2D6A4F] font-medium hover:underline">
         전체보기 →
       </a>
+    </div>
+  );
+}
+
+function B2bOrderList({ orders, showAmount }: { orders: B2bOrderSummary[]; showAmount: boolean }) {
+  const fmtDate = (d: string) =>
+    new Date(d).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' });
+  return (
+    <div className="divide-y divide-gray-100">
+      {orders.map((order) => {
+        const st = statusLabel[order.status] || { text: order.status, color: 'text-gray-600 bg-gray-100' };
+        const customerName = order.b2b_customers?.name || '';
+        return (
+          <a key={order.id} href="/b2b" className="px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition cursor-pointer block">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-gray-800">{order.order_number}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${st.color}`}>{st.text}</span>
+              </div>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="text-xs text-gray-500">{customerName}</span>
+                <span className="text-xs text-gray-400">발주 {fmtDate(order.order_date)}</span>
+              </div>
+            </div>
+            <div className="text-right shrink-0 ml-3">
+              <p className={`text-xs font-semibold ${order.ship_date ? 'text-blue-700' : 'text-gray-400'}`}>
+                {order.ship_date ? `출고예정 ${fmtDate(order.ship_date)}` : '출고일 미정'}
+              </p>
+              {showAmount && typeof order.total_amount === 'number' && (
+                <p className="text-sm font-bold text-gray-800">₩{order.total_amount.toLocaleString()}</p>
+              )}
+            </div>
+          </a>
+        );
+      })}
     </div>
   );
 }
