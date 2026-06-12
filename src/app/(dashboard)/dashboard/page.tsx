@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { getStoreDeliverySchedule, getJejuTwoXAdvanceNotice, type DeliveryInfo } from '@/lib/delivery-schedule';
-import type { Profile, DepositRequest } from '@/types';
+import type { Profile, DepositRequest, B2bDepositRequest } from '@/types';
 
 interface DepositTransaction {
   id: string;
@@ -99,6 +99,7 @@ export default function DashboardPage() {
   const [monthlyOrderList, setMonthlyOrderList] = useState<OrderSummary[]>([]);
   const [b2bPendingCount, setB2bPendingCount] = useState(0);
   const [b2bPendingList, setB2bPendingList] = useState<B2bOrderSummary[]>([]);
+  const [b2bPendingRequests, setB2bPendingRequests] = useState<B2bDepositRequest[]>([]);
 
   const JEJU_PALLET_MIN = 55;
   const supabase = createClient();
@@ -230,6 +231,14 @@ export default function DashboardPage() {
           .eq('status', 'pending')
           .order('created_at', { ascending: true });
         setPendingRequests((reqData as DepositRequest[]) || []);
+
+        // 대기 중인 B2B 입금 요청 (선입금 거래처 — 돼봉 등)
+        const { data: b2bReqData } = await supabase
+          .from('b2b_deposit_requests')
+          .select('*, b2b_customers(name)')
+          .eq('status', 'pending')
+          .order('created_at', { ascending: true });
+        setB2bPendingRequests((b2bReqData as B2bDepositRequest[]) || []);
       }
 
       // 가맹점: 이번 달 발주
@@ -371,6 +380,23 @@ export default function DashboardPage() {
     setProcessingId(null);
   }
 
+  async function handleB2bRequest(id: string, action: 'approve' | 'reject') {
+    setProcessingId(id);
+    const res = await fetch('/api/b2b/deposit-requests', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, action }),
+    });
+
+    if (res.ok) {
+      setB2bPendingRequests((prev) => prev.filter((r) => r.id !== id));
+    } else {
+      const data = await res.json();
+      alert(data.error || '처리에 실패했습니다.');
+    }
+    setProcessingId(null);
+  }
+
   if (!profile) return null;
 
   const roleLabel = {
@@ -451,7 +477,7 @@ export default function DashboardPage() {
       {/* ========== 관리자 대시보드 ========== */}
       {profile.role === 'admin' && (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
             <StatCard
               title="등록 가맹점"
               value={`${storeCount}곳`}
@@ -485,6 +511,13 @@ export default function DashboardPage() {
               color={pendingRequests.length > 0 ? 'red' : 'yellow'}
               isExpanded={expandedCard === 'depositRequests'}
               onToggle={() => toggleCard('depositRequests')}
+            />
+            <StatCard
+              title="B2B 입금 대기"
+              value={`${b2bPendingRequests.length}건`}
+              color={b2bPendingRequests.length > 0 ? 'red' : 'yellow'}
+              isExpanded={expandedCard === 'b2bDepositRequests'}
+              onToggle={() => toggleCard('b2bDepositRequests')}
             />
           </div>
 
@@ -610,6 +643,55 @@ export default function DashboardPage() {
                         </div>
                       );
                     })}
+                  </div>
+                  <ExpandedFooter href="/deposits" />
+                </>
+              )}
+            </ExpandedPanel>
+          )}
+
+          {/* B2B 입금 확인 대기 펼침 */}
+          {expandedCard === 'b2bDepositRequests' && (
+            <ExpandedPanel>
+              {b2bPendingRequests.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-4">대기 중인 B2B 입금 요청이 없습니다.</p>
+              ) : (
+                <>
+                  <div className="divide-y divide-gray-100">
+                    {b2bPendingRequests.slice(0, 5).map((req) => (
+                      <div key={req.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-semibold text-gray-800">{req.b2b_customers?.name}</span>
+                            <span className="text-lg font-bold text-green-600">₩{req.amount.toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            {req.description && (
+                              <span className="text-xs text-gray-500">{req.description}</span>
+                            )}
+                            <span className="text-xs text-gray-400">
+                              {new Date(req.created_at).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <button
+                            onClick={() => handleB2bRequest(req.id, 'reject')}
+                            disabled={processingId === req.id}
+                            className="px-3 py-1.5 text-sm border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 transition disabled:opacity-50"
+                          >
+                            반려
+                          </button>
+                          <button
+                            onClick={() => handleB2bRequest(req.id, 'approve')}
+                            disabled={processingId === req.id}
+                            className="px-3 py-1.5 text-sm bg-[#1B4332] text-white rounded-lg font-medium hover:bg-[#2D6A4F] transition disabled:opacity-50"
+                          >
+                            {processingId === req.id ? '처리 중...' : '승인'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                   <ExpandedFooter href="/deposits" />
                 </>
