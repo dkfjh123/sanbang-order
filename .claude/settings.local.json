@@ -8,7 +8,8 @@
       "Bash(npm install:*)",
       "Bash(for f:*)",
       "Bash(do basename:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(node scripts/audit-followup-daebong-pending-readonly.mjs)"
     ],
     "additionalDirectories": [
       "c:\\Users\\dkfjh\\dev\\산방식당발주프로그램\\web\\src\\app\\statement"
