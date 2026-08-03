@@ -9,7 +9,24 @@
       "Bash(for f:*)",
       "Bash(do basename:*)",
       "Bash(done)",
-      "Bash(node scripts/audit-followup-daebong-pending-readonly.mjs)"
+      "Bash(node scripts/audit-followup-daebong-pending-readonly.mjs)",
+      "PowerShell($p = \"C:\\\\Users\\\\dkfjh\\\\OneDrive\\\\2. Areas\\\\업무\\\\1. 산방\\\\2026부터_산방_마감\"; if \\(Test-Path $p\\) { Get-ChildItem $p -Recurse -Depth 2 | Select-Object Mode, LastWriteTime, Length, FullName | Format-Table -AutoSize } else { \"NOT FOUND: $p\" })",
+      "PowerShell($p = \"C:\\\\Users\\\\dkfjh\\\\OneDrive\\\\2. Areas\\\\업무\\\\1. 산방\\\\2026부터_산방_마감\"; Get-ChildItem $p -Recurse -Depth 2 | ForEach-Object { $_.FullName.Replace\\($p,'.'\\) })",
+      "PowerShell($p = \"C:\\\\Users\\\\dkfjh\\\\OneDrive\\\\2. Areas\\\\업무\\\\1. 산방\\\\2026부터_산방_마감\"; Write-Output \\(\"EXISTS=\" + \\(Test-Path $p\\)\\); $items = @\\(Get-ChildItem $p -Force -Recurse\\); Write-Output \\(\"ITEM_COUNT=\" + $items.Count\\))",
+      "PowerShell($root = \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\마감\"; New-Item -ItemType Directory -Force -Path $root | Out-Null; New-Item -ItemType Directory -Force -Path \"$root\\\\2026-07\" | Out-Null; New-Item -ItemType Directory -Force -Path \"$root\\\\_원본데이터\" | Out-Null; Get-ChildItem $root -Recurse | ForEach-Object { $_.FullName })",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-deposits-monthly-readonly.mjs\" 2026-07)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-deposits-monthly-readonly.mjs\" 2026-07 2>&1 | Select-Object -Skip 120)",
+      "PowerShell(Remove-Item \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\마감\\\\_원본데이터\" -Force -Confirm:$false; Get-ChildItem \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\마감\" -Recurse | ForEach-Object { $_.FullName })",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"C:\\\\Users\\\\dkfjh\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-dkfjh-devnew-projects-----------\\\\21319a63-8adf-49cf-bd8e-098087caa615\\\\scratchpad\\\\check-july-rejected.mjs\")",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-export-excel-readonly.mjs\" 2026-04 2026-07)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-audit-monthly-readonly.mjs\" 2026-07)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\check-courier-shipments-readonly.mjs\")",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\check-product-tax-readonly.mjs\")",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-tax-invoice-monthly-readonly.mjs\" 2026-07)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-tax-invoice-monthly-readonly.mjs\" 2026-07 2>&1 | Select-Object -First 70)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\check-b2b-july-invoice-readonly.mjs\")",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-shinwa-verify-monthly-readonly.mjs\" 2026-07 2>&1 | Select-Object -Skip 110)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; node \"c:\\\\Users\\\\dkfjh\\\\devnew\\\\projects\\\\산방식당발주프로그램\\\\scripts\\\\closing-shinwa-verify-monthly-readonly.mjs\" 2026-07 2>&1 | Select-Object -Skip 103 -First 40)"
     ],
     "additionalDirectories": [
       "c:\\Users\\dkfjh\\dev\\산방식당발주프로그램\\web\\src\\app\\statement"

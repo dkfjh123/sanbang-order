@@ -41,3 +41,6 @@ product_logs_recent.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 월마감 자료 (경영 숫자 - 공개 저장소에 올리지 않음)
+/마감/
