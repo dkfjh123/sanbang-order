@@ -92,6 +92,7 @@ export default function OrdersPage() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [orderItems, setOrderItems] = useState<OrderItem[]>([]);
   const [orderLogs, setOrderLogs] = useState<OrderLog[]>([]);
+  const [shippingId, setShippingId] = useState<string | null>(null);   // 출고 처리 중인 주문 (이중 클릭 방지)
   const [products, setProducts] = useState<Product[]>([]);
   const [inventory, setInventory] = useState<Record<string, number>>({});
   const [loosePack, setLoosePack] = useState<Record<string, number>>({});
@@ -227,21 +228,29 @@ export default function OrdersPage() {
     }
   };
 
+  // 출고 처리 — 이중 클릭 1차 방어(버튼 잠금). 서버에도 상태 선점 방어가 있다.
   const handleShipOrder = async (orderId: string) => {
+    if (shippingId) return;                       // 이미 처리 중이면 무시
     if (!confirm('이 주문을 출고 처리하시겠습니까?\n출고 후에는 상태를 되돌릴 수 없습니다.')) return;
-    const res = await fetch(`/api/orders/${orderId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'ship' }),
-    });
-    if (res.ok) {
-      await refreshOrders();
-      if (selectedOrder?.id === orderId) {
-        loadOrderDetail({ ...selectedOrder, status: 'shipped' });
+    setShippingId(orderId);
+    try {
+      const res = await fetch(`/api/orders/${orderId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ship' }),
+      });
+      if (res.ok) {
+        await refreshOrders();
+        if (selectedOrder?.id === orderId) {
+          loadOrderDetail({ ...selectedOrder, status: 'shipped' });
+        }
+      } else {
+        const { error } = await res.json().catch(() => ({ error: '출고 처리 실패' }));
+        alert(error || '출고 처리 실패');
+        await refreshOrders();                    // 서버 상태와 화면을 다시 맞춘다
       }
-    } else {
-      const { error } = await res.json().catch(() => ({ error: '출고 처리 실패' }));
-      alert(error || '출고 처리 실패');
+    } finally {
+      setShippingId(null);
     }
   };
 
@@ -902,8 +911,9 @@ export default function OrdersPage() {
                     <p className="text-sm text-gray-500 mb-2">상태 변경</p>
                     <div className="flex gap-2">
                       <button onClick={() => handleShipOrder(selectedOrder.id)}
-                        className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
-                        출고 처리
+                        disabled={shippingId !== null}
+                        className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed">
+                        {shippingId === selectedOrder.id ? '처리 중...' : '출고 처리'}
                       </button>
                       <button onClick={() => {
                         if (!confirm('발주 확정을 취소하시겠습니까?\n상태가 대기로 되돌아갑니다.')) return;

@@ -433,55 +433,110 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: 'action이 올바르지 않습니다.' }, { status: 400 });
   }
 
-  const { data: order } = await adminSupabase
+  // ----------------------------------------------------------
+  // (1) 상태 선점 — 이중 클릭/동시 요청 원천 차단
+  //   기존: SELECT status 로 확인 → 재고 차감 → UPDATE status.
+  //         첫 요청이 status 를 바꾸기 전에 두 번째 요청이 SELECT 를 통과해 버려
+  //         둘 다 재고를 차감했다(2026-07-30 ORD-20260728-0204, 2초 간격 2회 실행 → 생밀면 2박스 유령).
+  //   변경: 조건부 UPDATE 한 방으로 confirmed → shipped 를 '선점'한다.
+  //         Postgres 가 행을 잠그고 WHERE 를 재평가하므로 동시 요청 중 정확히 하나만 1행을 얻는다.
+  //         재고 차감에 실패하면 아래에서 상태를 confirmed 로 되돌린다.
+  // ----------------------------------------------------------
+  const { data: claimed, error: claimErr } = await adminSupabase
     .from('orders')
-    .select('status, order_number')
+    .update({ status: 'shipped' })
     .eq('id', id)
-    .single();
+    .eq('status', 'confirmed')
+    .select('id, order_number');
 
-  if (!order) {
-    return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
+  if (claimErr) {
+    return NextResponse.json({ error: `출고 처리 실패: ${claimErr.message}` }, { status: 500 });
   }
-  if (order.status !== 'confirmed') {
+
+  if (!claimed || claimed.length === 0) {
+    // 선점 실패 → 왜 실패했는지 구분해서 안내
+    const { data: cur } = await adminSupabase
+      .from('orders')
+      .select('status')
+      .eq('id', id)
+      .single();
+    if (!cur) {
+      return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
+    }
+    if (cur.status === 'shipped') {
+      return NextResponse.json({ error: '이미 출고 처리된 주문입니다.' }, { status: 409 });
+    }
     return NextResponse.json({ error: '확정된 주문만 출고 처리할 수 있습니다.' }, { status: 400 });
   }
 
-  // A안: 출고완료 시점에 reserved/on_hand(또는 reserved_pack/on_hand_pack) 차감.
-  //  - quantity / loose_pack_qty 는 발주 시점에 이미 줄였으므로 그대로 둠.
-  //  - inventory_transactions 는 발주 시점에 outbound 가 이미 기록됨 → 중복 방지 위해 여기선 추가 안 함.
+  // ----------------------------------------------------------
+  // (2) 재고 차감 — 실패를 절대 무시하지 않는다
+  //   A안: 출고완료 시점에 reserved/on_hand(또는 reserved_pack/on_hand_pack) 차감.
+  //    - quantity / loose_pack_qty 는 발주 시점에 이미 줄였으므로 그대로 둠.
+  //    - inventory_transactions 는 발주 시점에 outbound 가 이미 기록됨 → 여기선 추가 안 함.
+  //   기존에는 rpc 결과를 받지 않아, reserved 가 모자라 RPC 가 예외를 던져도 그대로 삼키고
+  //   '출고완료'로 넘어갔다(재고는 안 줄고 물건만 나감 → 유령 재고).
+  //   이제 하나라도 실패하면 이미 적용한 항목을 거울 롤백하고 상태도 되돌린 뒤 에러를 반환한다.
+  // ----------------------------------------------------------
   const { data: shipItems } = await adminSupabase
     .from('order_items')
     .select('product_id, quantity, unit')
     .eq('order_id', id);
 
-  if (shipItems) {
-    for (const it of shipItems as Array<{ product_id: string; quantity: number; unit: 'box' | 'pack' | null }>) {
-      const unit = it.unit || 'box';
-      // 출고완료 = (박스) reserved↓ + on_hand↓ / (팩) reserved_pack↓ + on_hand_pack↓. quantity 불변.
-      // 트랜잭션은 발주 시점에 이미 기록됨 → 여기선 재고 카운트만 (p_tx_type 생략).
-      // 공용 원자 RPC 로 행잠금 처리(재고행 없으면 조용히 스킵).
-      if (unit === 'box') {
-        await adminSupabase.rpc('apply_inventory_delta', {
+  const applied: Array<{ product_id: string; unit: 'box' | 'pack'; quantity: number }> = [];
+  let shipError: string | null = null;
+
+  for (const it of ((shipItems || []) as Array<{ product_id: string; quantity: number; unit: 'box' | 'pack' | null }>)) {
+    const unit: 'box' | 'pack' = it.unit || 'box';
+    // 출고완료 = (박스) reserved↓ + on_hand↓ / (팩) reserved_pack↓ + on_hand_pack↓. quantity 불변.
+    // 공용 원자 RPC 로 행잠금 처리(재고행 없으면 조용히 스킵).
+    const { error: rpcErr } = unit === 'box'
+      ? await adminSupabase.rpc('apply_inventory_delta', {
           p_product_id: it.product_id,
           p_d_reserved: -it.quantity,
           p_d_on_hand: -it.quantity,
           p_actor: user.id,
           p_require_exist: false,
-        });
-      } else {
-        await adminSupabase.rpc('apply_inventory_delta', {
+        })
+      : await adminSupabase.rpc('apply_inventory_delta', {
           p_product_id: it.product_id,
           p_d_reserved_pack: -it.quantity,
           p_d_on_hand_pack: -it.quantity,
           p_actor: user.id,
           p_require_exist: false,
         });
-      }
-    }
+
+    if (rpcErr) { shipError = rpcErr.message; break; }
+    applied.push({ product_id: it.product_id, unit, quantity: it.quantity });
   }
 
-  await adminSupabase.from('orders').update({ status: 'shipped' }).eq('id', id);
+  if (shipError) {
+    // 거울 롤백 — 이미 차감한 항목을 되돌린다
+    for (const a of applied) {
+      await adminSupabase.rpc('apply_inventory_delta', a.unit === 'box'
+        ? {
+            p_product_id: a.product_id,
+            p_d_reserved: a.quantity,
+            p_d_on_hand: a.quantity,
+            p_actor: user.id,
+            p_require_exist: false,
+          }
+        : {
+            p_product_id: a.product_id,
+            p_d_reserved_pack: a.quantity,
+            p_d_on_hand_pack: a.quantity,
+            p_actor: user.id,
+            p_require_exist: false,
+          });
+    }
+    // 상태 원복 (선점 해제)
+    await adminSupabase.from('orders').update({ status: 'confirmed' }).eq('id', id);
+    return NextResponse.json({
+      error: `재고 차감에 실패해 출고 처리를 취소했습니다. 재고를 확인해주세요. (${shipError})`,
+    }, { status: 400 });
+  }
 
+  // (3) 성공한 경우에만 이력 기록
   await adminSupabase.from('order_logs').insert({
     order_id: id,
     action: '출고 처리',
