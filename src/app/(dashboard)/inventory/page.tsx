@@ -25,6 +25,7 @@ interface InventoryItem {
     pack_per_box: number;
     is_loose_pack_sellable: boolean;
     allow_unit_change: boolean;
+    is_active?: boolean;          // false = 판매중지(가맹점 발주 화면에 안 뜸). 재고 관리는 계속 가능.
   };
 }
 
@@ -130,21 +131,23 @@ export default function InventoryPage() {
     // 기존 inventory 레코드 로드
     const { data: inv } = await supabase
       .from('inventory')
-      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable, allow_unit_change)')
+      .select('*, products(name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable, allow_unit_change, is_active)')
       .order('product_id');
     const existingItems = (inv as InventoryItem[]) || [];
     const existingProductIds = new Set(existingItems.map((i) => i.product_id));
 
     // 전용상품 중 inventory 레코드가 없는 상품도 표시 (재고 0)
+    //  판매중지(is_active=false)도 포함한다. 신규 전용상품은 판매가가 확정되기 전까지
+    //  판매중지로 등록되는데, 그동안에도 창고에는 물건이 들어오므로 입고 등록이 가능해야 한다.
+    //  (가맹점 발주 화면은 is_active=true 만 보므로 노출 위험은 없음)
     const { data: exclusiveProducts } = await supabase
       .from('products')
-      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable, allow_unit_change')
-      .eq('product_type', 'exclusive')
-      .eq('is_active', true);
+      .select('id, name, spec, unit, storage, product_type, cost_price_with_tax, price_with_tax, sanbang_food_sale_price_with_tax, pack_per_box, is_loose_pack_sellable, allow_unit_change, is_active')
+      .eq('product_type', 'exclusive');
 
     const missingItems: InventoryItem[] = (exclusiveProducts || [])
       .filter((p: { id: string }) => !existingProductIds.has(p.id))
-      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; sanbang_food_sale_price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean; allow_unit_change: boolean }) => ({
+      .map((p: { id: string; name: string; spec: string | null; unit: string; storage: string | null; product_type: string; cost_price_with_tax: number; price_with_tax: number; sanbang_food_sale_price_with_tax: number; pack_per_box: number; is_loose_pack_sellable: boolean; allow_unit_change: boolean; is_active: boolean }) => ({
         id: `virtual-${p.id}`,
         product_id: p.id,
         quantity: 0,
@@ -165,6 +168,7 @@ export default function InventoryPage() {
           pack_per_box: p.pack_per_box,
           is_loose_pack_sellable: p.is_loose_pack_sellable,
           allow_unit_change: p.allow_unit_change,
+          is_active: p.is_active,
         },
       }));
 
@@ -500,7 +504,19 @@ export default function InventoryPage() {
                   <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs font-semibold">부족</span>
                 )}
               </div>
-              <h3 className="font-bold text-gray-800">{item.products?.name}</h3>
+              <h3 className="font-bold text-gray-800">
+                {item.products?.name}
+                {item.products?.is_active === false && (
+                  <span className="ml-2 px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-[11px] font-medium align-middle">
+                    판매중지
+                  </span>
+                )}
+              </h3>
+              {item.products?.is_active === false && (
+                <p className="mt-1 text-[11px] text-gray-400 leading-relaxed">
+                  가맹점 발주 화면에는 아직 안 뜹니다. 재고 입고는 지금도 등록할 수 있습니다.
+                </p>
+              )}
               <div className="mt-3 flex items-end justify-between">
                 <div>
                   <p className="text-3xl font-bold text-gray-800">{item.quantity}</p>
