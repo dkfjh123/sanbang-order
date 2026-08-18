@@ -37,11 +37,12 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { product_id, type, quantity, description } = body as {
+  const { product_id, type, quantity, description, unit } = body as {
     product_id: string;
     type: 'inbound' | 'outbound' | 'adjustment';
     quantity: number;
     description?: string;
+    unit?: 'box' | 'pack';
   };
 
   if (!product_id || !['inbound', 'outbound', 'adjustment'].includes(type)) {
@@ -52,14 +53,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '수량은 1 이상의 정수여야 합니다.' }, { status: 400 });
   }
 
+  // 단위 — 박스가 기본. 낱팩은 박스 입수가 2 이상인 상품에서만 의미가 있다.
+  //  낱팩 입고는 "제조사가 낱개로 보낸 분량"을 그대로 잡는 용도다.
+  //  박스를 헐어 낱팩을 만드는 것이 아니므로 박스 재고는 건드리지 않는다.
+  const txUnit: 'box' | 'pack' = unit === 'pack' ? 'pack' : 'box';
+
   // 상품 확인
   const { data: product } = await adminSupabase
     .from('products')
-    .select('id, product_type')
+    .select('id, product_type, pack_per_box')
     .eq('id', product_id)
     .single();
   if (!product) {
     return NextResponse.json({ error: '상품을 찾을 수 없습니다.' }, { status: 400 });
+  }
+  if (txUnit === 'pack' && (product.pack_per_box || 1) <= 1) {
+    return NextResponse.json({
+      error: '이 상품은 박스 안에 낱팩 구분이 없어 낱팩 단위로 등록할 수 없습니다.',
+    }, { status: 400 });
   }
 
   const change = type === 'outbound' ? -qty : qty;
@@ -80,7 +91,9 @@ export async function POST(request: Request) {
     }
     const { error: insErr } = await adminSupabase
       .from('inventory')
-      .insert({ product_id, quantity: change, on_hand: change });
+      .insert(txUnit === 'box'
+        ? { product_id, quantity: change, on_hand: change, loose_pack_qty: 0, on_hand_pack: 0 }
+        : { product_id, quantity: 0, on_hand: 0, loose_pack_qty: change, on_hand_pack: change });
     if (insErr) {
       return NextResponse.json({ error: insErr.message }, { status: 400 });
     }
@@ -88,6 +101,7 @@ export async function POST(request: Request) {
       product_id,
       type,
       quantity: change,
+      unit: txUnit,
       description: txDescription,
       source: txSource,
       created_by: user.id,
@@ -96,14 +110,16 @@ export async function POST(request: Request) {
   }
 
   // 기존 재고행 → 공용 원자 RPC(행잠금 + 음수가드).
-  // 입고/출고/조정: quantity 와 on_hand 를 같은 폭으로 변경(reserved 불변).
+  // 입고/출고/조정: 주문가능과 총재고를 같은 폭으로 변경(reserved 불변 → 등식 유지).
+  //  박스면 quantity/on_hand, 낱팩이면 loose_pack_qty/on_hand_pack.
   const { error: rpcErr } = await adminSupabase.rpc('apply_inventory_delta', {
     p_product_id: product_id,
-    p_d_quantity: change,
-    p_d_on_hand: change,
+    ...(txUnit === 'box'
+      ? { p_d_quantity: change, p_d_on_hand: change }
+      : { p_d_loose_pack: change, p_d_on_hand_pack: change }),
     p_tx_type: type,
     p_tx_quantity: change,
-    p_tx_unit: 'box',
+    p_tx_unit: txUnit,
     p_tx_description: txDescription,
     p_tx_source: txSource,
     p_actor: user.id,

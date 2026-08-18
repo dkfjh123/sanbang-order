@@ -98,6 +98,7 @@ export default function InventoryPage() {
   const [txType, setTxType] = useState<'inbound' | 'outbound' | 'adjustment'>('inbound');
   const [txQty, setTxQty] = useState('');
   const [txDesc, setTxDesc] = useState('');
+  const [txUnit, setTxUnit] = useState<'box' | 'pack'>('box');   // 입출고 단위 (낱팩은 박스입수 2 이상 상품만)
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [txFilter, setTxFilter] = useState('');
@@ -308,6 +309,7 @@ export default function InventoryPage() {
         product_id: selectedProduct,
         type: txType,
         quantity: qty,
+        unit: txUnit,
         description: txDesc || undefined,
       }),
     });
@@ -324,6 +326,7 @@ export default function InventoryPage() {
     setShowPasswordModal(false);
     setTxQty('');
     setTxDesc('');
+    setTxUnit('box');
     loadData();
     loadTransactions(txStartDate, txEndDate);
   };
@@ -551,7 +554,9 @@ export default function InventoryPage() {
                       <p className="text-lg font-bold text-gray-800">{item.quantity}</p>
                     </div>
                   </div>
-                  {item.products.allow_unit_change && (
+                  {/* 팩 3분할 — 박스↔팩 단위변경 상품이거나, 낱팩 판매를 켠 상품이면 보여준다.
+                      (두루치기소스처럼 '박스는 안 쪼개지만 낱팩으로 들어와 낱개로 파는' 상품 대응) */}
+                  {(item.products.allow_unit_change || item.products.is_loose_pack_sellable) && (
                     <div className="mt-2 grid grid-cols-3 gap-2 text-center">
                       <div className="bg-gray-50 rounded-md py-1.5">
                         <p className="text-[11px] text-gray-500">팩 총재고</p>
@@ -828,11 +833,47 @@ export default function InventoryPage() {
                     .filter((item) => userRole !== 'shinwa' || item.products?.product_type === 'general')
                     .map((item) => (
                     <option key={item.product_id} value={item.product_id}>
-                      {item.products?.name} (현재: {item.quantity}{item.products?.unit})
+                      {item.products?.name} (현재: {item.quantity}{item.products?.unit}
+                      {(item.products?.pack_per_box || 1) > 1 ? ` ${item.loose_pack_qty || 0}팩` : ''})
                     </option>
                   ))}
                 </select>
               </div>
+
+              {/* 단위 — 박스 입수가 2 이상인 상품만 낱팩 선택 가능.
+                  제조사가 낱개로 보낸 분량을 그대로 잡는 용도이며, 박스를 헐지 않는다. */}
+              {(() => {
+                const sel = items.find((i) => i.product_id === selectedProduct);
+                const ppb = sel?.products?.pack_per_box || 1;
+                if (ppb <= 1) return null;
+                return (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">단위</label>
+                    <div className="flex gap-2">
+                      {([['box', `박스 (1박스 = ${ppb}팩)`], ['pack', '낱팩']] as const).map(([key, label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setTxUnit(key)}
+                          className={`flex-1 py-2 rounded-lg text-sm font-medium border transition ${
+                            txUnit === key
+                              ? 'bg-[#1B4332] text-white border-[#1B4332]'
+                              : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {txUnit === 'pack' && (
+                      <p className="mt-1 text-[11px] text-gray-400 leading-relaxed">
+                        낱팩으로 들어온 분량만 잡습니다. 박스 재고는 변하지 않으며,
+                        가맹점은 이 낱팩 수량 한도 안에서만 낱개 주문이 가능합니다.
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">수량</label>
