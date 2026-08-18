@@ -6,7 +6,11 @@ import { NextResponse } from 'next/server';
 // 기존엔 클라이언트가 inventory 를 직접 update 했으나, lost update 방지를 위해
 // 서버에서 공용 원자 RPC(apply_inventory_delta) 를 통해 처리한다.
 //  - 입고/출고/조정은 reserved 와 무관 → quantity 와 on_hand 를 같은 폭으로 변경.
-//  - 권한: admin = 전체, shinwa = 범용상품(general)만.
+//  - 권한: **관리자(admin) 전용.**
+//    2026-08-18 확정 — 재고를 손으로 움직이는 '조정'은 사장님과 박주영 과장만 한다.
+//    신화푸드에서는 원래도 수동 입출고 등록 실적이 0건이었고(입고 등록은 전부 관리자가 수행),
+//    신화 계정에 남은 재고 기록은 전부 출고처리 버튼이 자동으로 남긴 것이라 업무 영향 없음.
+//    신화푸드는 계속 '출고 처리'만 할 수 있고, 잘못 눌렀을 때 되돌리는 것도 관리자 몫이다.
 export async function POST(request: Request) {
   const serverSupabase = await createServerClient();
   const { data: { user } } = await serverSupabase.auth.getUser();
@@ -26,8 +30,10 @@ export async function POST(request: Request) {
     .single();
 
   const role = profile?.role;
-  if (role !== 'admin' && role !== 'shinwa') {
-    return NextResponse.json({ error: '입출고 권한이 없습니다.' }, { status: 403 });
+  if (role !== 'admin') {
+    return NextResponse.json({
+      error: '재고 입출고·조정은 관리자만 할 수 있습니다. 본사에 문의해주세요.',
+    }, { status: 403 });
   }
 
   const body = await request.json();
@@ -46,7 +52,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '수량은 1 이상의 정수여야 합니다.' }, { status: 400 });
   }
 
-  // 상품 확인 + 신화 권한(범용상품만)
+  // 상품 확인
   const { data: product } = await adminSupabase
     .from('products')
     .select('id, product_type')
@@ -54,9 +60,6 @@ export async function POST(request: Request) {
     .single();
   if (!product) {
     return NextResponse.json({ error: '상품을 찾을 수 없습니다.' }, { status: 400 });
-  }
-  if (role === 'shinwa' && product.product_type !== 'general') {
-    return NextResponse.json({ error: '신화푸드는 범용상품만 입출고할 수 있습니다.' }, { status: 403 });
   }
 
   const change = type === 'outbound' ? -qty : qty;

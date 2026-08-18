@@ -72,6 +72,13 @@ interface OrderLog {
   created_at: string;
 }
 
+// 관리자가 되돌린 출고 1건 (주문별 최신 1개만 보관)
+interface UnshipLog {
+  description: string | null;
+  changed_by_name: string | null;
+  created_at: string;
+}
+
 const statusLabel: Record<string, { text: string; color: string }> = {
   pending: { text: '대기', color: 'bg-yellow-100 text-yellow-700' },
   confirmed: { text: '확정', color: 'bg-green-100 text-green-700' },
@@ -92,6 +99,7 @@ export default function OrdersPage() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [orderItems, setOrderItems] = useState<OrderItem[]>([]);
   const [orderLogs, setOrderLogs] = useState<OrderLog[]>([]);
+  const [unshipLogs, setUnshipLogs] = useState<Record<string, UnshipLog>>({});   // 주문id → 관리자 출고취소 기록
   const [shippingId, setShippingId] = useState<string | null>(null);   // 출고 처리 중인 주문 (이중 클릭 방지)
   const [products, setProducts] = useState<Product[]>([]);
   const [inventory, setInventory] = useState<Record<string, number>>({});
@@ -123,6 +131,33 @@ export default function OrdersPage() {
     setLoosePack(looseMap);
   }, [supabase]);
 
+  // 관리자가 되돌린 출고 목록 — 신화푸드가 반드시 알아야 하는 정보.
+  //  출고취소를 모르고 지나가면 물류수수료를 중복 청구하고 창고 재고도 어긋난다.
+  //  order_logs 의 '출고 되돌리기' 기록(최근 30일)을 주문별로 모아 알림/배너에 쓴다.
+  const refreshUnshipLogs = useCallback(async () => {
+    const since = new Date();
+    since.setDate(since.getDate() - 30);
+    const { data } = await supabase
+      .from('order_logs')
+      .select('order_id, description, changed_by_name, created_at')
+      .eq('action', '출고 되돌리기')
+      .gte('created_at', since.toISOString())
+      .order('created_at', { ascending: false });
+
+    const map: Record<string, UnshipLog> = {};
+    for (const l of (data || []) as Array<{ order_id: string; description: string | null; changed_by_name: string | null; created_at: string }>) {
+      // 같은 주문이 여러 번이면 가장 최근 것만 (내림차순 정렬이므로 첫 번째)
+      if (!map[l.order_id]) {
+        map[l.order_id] = {
+          description: l.description,
+          changed_by_name: l.changed_by_name,
+          created_at: l.created_at,
+        };
+      }
+    }
+    setUnshipLogs(map);
+  }, [supabase]);
+
   useEffect(() => {
     async function load() {
       const { data: { user } } = await supabase.auth.getUser();
@@ -149,10 +184,11 @@ export default function OrdersPage() {
       setOrders((data as Order[]) || []);
       setProducts((prods as Product[]) || []);
       await refreshInventory();
+      await refreshUnshipLogs();
       setLoading(false);
     }
     load();
-  }, [refreshInventory, supabase]);
+  }, [refreshInventory, refreshUnshipLogs, supabase]);
 
   const loadOrderDetail = async (order: Order) => {
     setSelectedOrder(order);
@@ -192,6 +228,7 @@ export default function OrdersPage() {
       .select('*, stores(short_name, name, region, delivery_days, allow_split_shipping, deadline_override_until)')
       .order('created_at', { ascending: false });
     setOrders((data as Order[]) || []);
+    await refreshUnshipLogs();
   };
 
   const updateStatus = async (orderId: string, newStatus: string) => {
@@ -228,10 +265,46 @@ export default function OrdersPage() {
     }
   };
 
+  // 출고 되돌리기 — 관리자 전용. 실물이 안 나갔는데 출고처리가 눌린 경우 정정.
+  //  출고완료 → 확정 으로 되돌리고 창고 재고를 복구한다.
+  //  아예 없앨 거면 되돌린 뒤 '주문 취소' 를 이어서 누르면 예치금까지 자동 환불된다.
+  const handleUnshipOrder = async (orderId: string) => {
+    if (shippingId) return;
+    if (!confirm(
+      '이 주문의 출고 처리를 되돌리시겠습니까?\n\n'
+      + '· 주문 상태: 출고완료 → 확정\n'
+      + '· 창고 재고: 주문 수량만큼 다시 채워집니다\n'
+      + '· 예치금은 그대로입니다 (주문이 살아 있으므로)\n\n'
+      + '주문 자체를 없애려면, 되돌린 뒤 "주문 취소"를 눌러주세요. 그때 예치금이 환불됩니다.'
+    )) return;
+    const reason = prompt('되돌리는 사유를 적어주세요. (예: 8/17 신화 출고처리했으나 실물 미출고)') || '';
+    if (!reason.trim()) { alert('사유를 입력해야 되돌릴 수 있습니다.'); return; }
+    setShippingId(orderId);
+    try {
+      const res = await fetch(`/api/orders/${orderId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'unship', reason }),
+      });
+      if (res.ok) {
+        await refreshOrders();
+        if (selectedOrder?.id === orderId) {
+          loadOrderDetail({ ...selectedOrder, status: 'confirmed' });
+        }
+      } else {
+        const { error } = await res.json().catch(() => ({ error: '출고 되돌리기 실패' }));
+        alert(error || '출고 되돌리기 실패');
+        await refreshOrders();
+      }
+    } finally {
+      setShippingId(null);
+    }
+  };
+
   // 출고 처리 — 이중 클릭 1차 방어(버튼 잠금). 서버에도 상태 선점 방어가 있다.
   const handleShipOrder = async (orderId: string) => {
     if (shippingId) return;                       // 이미 처리 중이면 무시
-    if (!confirm('이 주문을 출고 처리하시겠습니까?\n출고 후에는 상태를 되돌릴 수 없습니다.')) return;
+    if (!confirm('이 주문을 출고 처리하시겠습니까?\n실제로 물건이 나간 것만 눌러주세요.\n잘못 눌렀을 때 되돌리는 것은 관리자만 할 수 있습니다.')) return;
     setShippingId(orderId);
     try {
       const res = await fetch(`/api/orders/${orderId}`, {
@@ -452,9 +525,54 @@ export default function OrdersPage() {
         const todayOrders = orders.filter(
           (o) => o.status === 'confirmed' && o.ship_date && o.ship_date === todayStr
         );
-        if (delayedOrders.length === 0 && todayOrders.length === 0) return null;
+        // 관리자가 출고를 되돌린 건 (최근 30일). 신화푸드가 놓치면 수수료 중복·재고 오차로 이어진다.
+        const unshippedOrders = orders
+          .filter((o) => unshipLogs[o.id])
+          .sort((a, b) => (unshipLogs[b.id].created_at).localeCompare(unshipLogs[a.id].created_at));
+        if (delayedOrders.length === 0 && todayOrders.length === 0 && unshippedOrders.length === 0) return null;
         return (
           <div className="space-y-3">
+            {unshippedOrders.length > 0 && (
+              <div className="bg-orange-50 border-2 border-orange-300 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-bold text-orange-800">
+                    ⚠️ 관리자 출고 취소 ({unshippedOrders.length}건)
+                  </span>
+                  <span className="text-[11px] text-orange-700">최근 30일</span>
+                </div>
+                <p className="text-[11px] text-orange-700 mb-2 leading-relaxed">
+                  출고완료로 처리됐으나 실제로 출고되지 않아 <b>본사(관리자)가 출고를 취소한 건</b>입니다.
+                  시스템상 출고되지 않은 것으로 처리되었고, 창고 재고도 나가지 않은 것으로 복구되었습니다.
+                </p>
+                <div className="space-y-1">
+                  {unshippedOrders.map((o) => {
+                    const log = unshipLogs[o.id];
+                    const at = new Date(log.created_at);
+                    const atLabel = `${at.getMonth() + 1}/${at.getDate()} ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+                    return (
+                      <button
+                        key={o.id}
+                        onClick={() => loadOrderDetail(o)}
+                        className="w-full text-left px-3 py-2 bg-white rounded-lg hover:bg-orange-100 transition border border-orange-200"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-gray-800">
+                            {o.order_number} · {o.stores?.short_name || o.stores?.name}
+                          </span>
+                          <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${statusLabel[o.status]?.color || 'bg-gray-100 text-gray-600'}`}>
+                            {o.status === 'cancelled' ? '주문 취소됨' : statusLabel[o.status]?.text}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-orange-700 mt-0.5">
+                          원래 출고일 {formatShipDate(o.ship_date)} · {atLabel} {log.changed_by_name || '관리자'}(관리자)가 출고 취소
+                          {log.description ? ` · ${log.description}` : ''}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {delayedOrders.length > 0 && (
               <div className="bg-red-50 border border-red-200 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
@@ -609,6 +727,30 @@ export default function OrdersPage() {
               <h3 className="text-lg font-bold text-gray-800">{selectedOrder.order_number}</h3>
               <button onClick={() => setSelectedOrder(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
             </div>
+
+            {/* 관리자 출고 취소 배너 — 모든 역할에게 표시. 신화푸드가 수수료를 중복 청구하지 않도록. */}
+            {unshipLogs[selectedOrder.id] && (() => {
+              const log = unshipLogs[selectedOrder.id];
+              const at = new Date(log.created_at);
+              return (
+                <div className="mb-4 bg-orange-50 border-2 border-orange-300 rounded-xl p-3">
+                  <p className="font-bold text-orange-800 text-sm mb-1">
+                    ⚠️ 이 발주는 본사(관리자)가 출고를 취소했습니다
+                  </p>
+                  <p className="text-xs text-orange-800 leading-relaxed">
+                    {at.toLocaleString('ko-KR')} · <b>{log.changed_by_name || '관리자'}(관리자)</b>
+                    {log.description ? ` · ${log.description}` : ''}
+                  </p>
+                  <p className="text-[11px] text-orange-700 mt-1.5 leading-relaxed">
+                    출고완료로 눌렸지만 실제로는 나가지 않은 건입니다.
+                    창고 재고는 나가지 않은 것으로 복구되었습니다.
+                    {selectedOrder.status === 'cancelled'
+                      ? ' 주문 자체가 취소되었으므로 이 건으로는 출고하지 마세요.'
+                      : ' 실제로 출고하실 때 다시 「출고 처리」를 눌러주세요.'}
+                  </p>
+                </div>
+              );
+            })()}
 
             {/* 요청 배송일 배너 — 동일옥처럼 점주가 직접 선택하는 매장의 주문에만 */}
             {selectedOrder.stores?.allow_split_shipping && selectedOrder.ship_date && (
@@ -923,6 +1065,22 @@ export default function OrdersPage() {
                         확정 취소
                       </button>
                     </div>
+                  </div>
+                )}
+                {/* 출고 되돌리기 — 관리자 전용 (신화푸드에는 보이지 않음) */}
+                {selectedOrder.status === 'shipped' && profile?.role === 'admin' && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <p className="text-sm text-gray-500 mb-2">관리자 조정</p>
+                    <button onClick={() => handleUnshipOrder(selectedOrder.id)}
+                      disabled={shippingId !== null}
+                      className="w-full py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed">
+                      {shippingId === selectedOrder.id ? '처리 중...' : '출고 되돌리기'}
+                    </button>
+                    <p className="mt-1.5 text-[11px] text-gray-400 leading-relaxed">
+                      실제로 물건이 안 나갔는데 출고처리된 경우에 사용합니다.
+                      상태가 &apos;확정&apos;으로 돌아가고 창고 재고가 복구됩니다.
+                      주문 자체를 없애려면 되돌린 뒤 &apos;주문 취소&apos;를 누르면 예치금까지 환불됩니다.
+                    </p>
                   </div>
                 )}
               </>

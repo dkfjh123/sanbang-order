@@ -292,7 +292,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   // 권한 확인
   const { data: profile } = await adminSupabase
     .from('profiles')
-    .select('role, store_id')
+    .select('role, store_id, name')
     .eq('id', user.id)
     .single();
 
@@ -397,10 +397,28 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     });
   }
 
+  // 취소 이력 — 신화푸드도 상세에서 "누가 왜 취소했는지" 볼 수 있어야 한다.
+  //  (출고 되돌리기 후 취소한 건이면 앞선 '출고 되돌리기' 로그와 짝을 이룬다)
+  await adminSupabase.from('order_logs').insert({
+    order_id: id,
+    action: '주문 취소',
+    description: order.status === 'confirmed'
+      ? '확정 상태에서 취소 — 재고 복구 + 예치금 환불 완료'
+      : '취소 — 재고 복구 + 예치금 환불 완료',
+    changed_by: user.id,
+    changed_by_name: profile?.name,
+    changed_by_role: profile?.role,
+  });
+
   return NextResponse.json({ success: true });
 }
 
-// PATCH: action='ship' — confirmed → shipped (재고는 발주 시점에 이미 차감, 여기선 상태만 변경)
+// PATCH
+//  - action='ship'   : confirmed → shipped. 신화푸드 또는 관리자.
+//  - action='unship' : shipped → confirmed (출고 되돌리기). **관리자 전용.**
+//      실물이 안 나갔는데 출고처리가 눌린 경우를 바로잡는다(2026-08-17 실제 발생).
+//      되돌린 뒤 완전히 없애려면 기존 '주문 취소'(DELETE) 를 이어서 쓰면
+//      재고 복구 + 예치금 환불까지 자동으로 끝난다.
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const serverSupabase = await createServerClient();
@@ -427,10 +445,126 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   }
 
   const body = await request.json();
-  const action = body.action as 'ship' | undefined;
+  const action = body.action as 'ship' | 'unship' | undefined;
 
-  if (action !== 'ship') {
+  if (action !== 'ship' && action !== 'unship') {
     return NextResponse.json({ error: 'action이 올바르지 않습니다.' }, { status: 400 });
+  }
+
+  // ==========================================================
+  // unship — 출고 되돌리기 (관리자 전용)
+  //   출고완료의 정확한 거울: reserved += 수량, on_hand += 수량 (quantity 불변)
+  //   → 등식 on_hand = quantity + reserved 유지 (034 자물쇠 통과)
+  //   신화푸드는 이 기능을 쓸 수 없다. 잘못 눌린 출고를 되돌리는 '조정'은
+  //   관리자(사장님·박주영 과장)만 하도록 2026-08-18 확정.
+  // ==========================================================
+  if (action === 'unship') {
+    if (profile?.role !== 'admin') {
+      return NextResponse.json({
+        error: '출고 되돌리기는 관리자만 할 수 있습니다. 본사에 문의해주세요.',
+      }, { status: 403 });
+    }
+
+    // (1) 상태 선점 — 이중 클릭/동시 요청 차단. shipped 인 경우에만 1행을 얻는다.
+    const { data: claimed, error: claimErr } = await adminSupabase
+      .from('orders')
+      .update({ status: 'confirmed' })
+      .eq('id', id)
+      .eq('status', 'shipped')
+      .select('id, order_number');
+
+    if (claimErr) {
+      return NextResponse.json({ error: `출고 되돌리기 실패: ${claimErr.message}` }, { status: 500 });
+    }
+    if (!claimed || claimed.length === 0) {
+      const { data: cur } = await adminSupabase
+        .from('orders').select('status').eq('id', id).single();
+      if (!cur) {
+        return NextResponse.json({ error: '주문을 찾을 수 없습니다.' }, { status: 404 });
+      }
+      return NextResponse.json({
+        error: `출고완료 상태인 주문만 되돌릴 수 있습니다. (현재: ${cur.status})`,
+      }, { status: 400 });
+    }
+
+    // (2) 재고 복구 — 실패를 무시하지 않는다. 하나라도 실패하면 전부 원복.
+    const { data: unshipItems } = await adminSupabase
+      .from('order_items')
+      .select('product_id, product_name, quantity, unit')
+      .eq('order_id', id);
+
+    const restored: Array<{ product_id: string; unit: 'box' | 'pack'; quantity: number }> = [];
+    let unshipError: string | null = null;
+
+    for (const it of ((unshipItems || []) as Array<{ product_id: string; product_name: string; quantity: number; unit: 'box' | 'pack' | null }>)) {
+      const unit: 'box' | 'pack' = it.unit || 'box';
+      const { error: rpcErr } = unit === 'box'
+        ? await adminSupabase.rpc('apply_inventory_delta', {
+            p_product_id: it.product_id,
+            p_d_reserved: it.quantity,
+            p_d_on_hand: it.quantity,
+            p_tx_type: 'inbound',
+            p_tx_unit: 'box',
+            p_tx_quantity: it.quantity,
+            p_tx_description: `출고 되돌리기 (${claimed[0].order_number}) — ${it.product_name} ${it.quantity}박스 창고 복귀`,
+            p_actor: user.id,
+            p_require_exist: false,
+          })
+        : await adminSupabase.rpc('apply_inventory_delta', {
+            p_product_id: it.product_id,
+            p_d_reserved_pack: it.quantity,
+            p_d_on_hand_pack: it.quantity,
+            p_tx_type: 'inbound',
+            p_tx_unit: 'pack',
+            p_tx_quantity: it.quantity,
+            p_tx_description: `출고 되돌리기 (${claimed[0].order_number}) — ${it.product_name} ${it.quantity}팩 창고 복귀`,
+            p_actor: user.id,
+            p_require_exist: false,
+          });
+
+      if (rpcErr) { unshipError = rpcErr.message; break; }
+      restored.push({ product_id: it.product_id, unit, quantity: it.quantity });
+    }
+
+    if (unshipError) {
+      // 거울 롤백 — 이미 복구한 항목을 되돌린다
+      for (const r of restored) {
+        await adminSupabase.rpc('apply_inventory_delta', r.unit === 'box'
+          ? {
+              p_product_id: r.product_id,
+              p_d_reserved: -r.quantity,
+              p_d_on_hand: -r.quantity,
+              p_actor: user.id,
+              p_require_exist: false,
+            }
+          : {
+              p_product_id: r.product_id,
+              p_d_reserved_pack: -r.quantity,
+              p_d_on_hand_pack: -r.quantity,
+              p_actor: user.id,
+              p_require_exist: false,
+            });
+      }
+      // 상태 원복 (선점 해제)
+      await adminSupabase.from('orders').update({ status: 'shipped' }).eq('id', id);
+      return NextResponse.json({
+        error: `재고 복구에 실패해 되돌리기를 취소했습니다. 재고를 확인해주세요. (${unshipError})`,
+      }, { status: 400 });
+    }
+
+    const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : null;
+    await adminSupabase.from('order_logs').insert({
+      order_id: id,
+      action: '출고 되돌리기',
+      description: reason
+        ? `출고완료 → 확정. 사유: ${reason}`
+        : '출고완료 → 확정 (실물 미출고 정정)',
+      changed_by: user.id,
+      changed_by_name: profile?.name,
+      changed_by_role: profile?.role,
+    });
+
+    return NextResponse.json({ success: true });
   }
 
   // ----------------------------------------------------------

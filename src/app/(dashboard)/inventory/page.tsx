@@ -440,12 +440,13 @@ export default function InventoryPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800">재고 관리</h2>
-        {(userRole === 'admin' || userRole === 'shinwa') && (
+        {/* 입출고·조정은 관리자 전용 (2026-08-18). 신화푸드는 재고 조회만. */}
+        {userRole === 'admin' && (
           <button
             onClick={() => setShowModal(true)}
             className="px-4 py-2 bg-[#1B4332] text-white rounded-lg text-sm font-medium hover:bg-[#2D6A4F] transition"
           >
-            {userRole === 'shinwa' ? '+ 범용상품 입/출고' : '+ 입/출고 등록'}
+            + 입/출고 등록
           </button>
         )}
       </div>
