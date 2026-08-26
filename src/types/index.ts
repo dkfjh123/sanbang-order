@@ -16,6 +16,7 @@ export interface Store {
   short_name: string;
   owner_name: string;
   business_number: string;
+  corporate_number: string | null;
   address: string;
   contact_name: string;
   contact_phone: string;
